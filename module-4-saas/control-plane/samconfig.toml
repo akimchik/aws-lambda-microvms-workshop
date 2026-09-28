@@ -1,0 +1,6 @@
+version = 0.1
+[default.deploy.parameters]
+stack_name = "saas-control-plane"
+resolve_s3 = true
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"

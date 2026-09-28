@@ -1,0 +1,730 @@
+"""Configuration types."""
+
+from __future__ import annotations
+
+import math
+import random
+from dataclasses import dataclass, field
+from enum import Enum, StrEnum
+from typing import TYPE_CHECKING, Generic, TypeVar
+
+from aws_durable_execution_sdk_python.exceptions import ValidationError
+
+
+P = TypeVar("P")  # Payload type
+R = TypeVar("R")  # Result type
+T = TypeVar("T")
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+    from aws_durable_execution_sdk_python.retries import RetryDecision
+    from aws_durable_execution_sdk_python.serdes import SerDes
+    from aws_durable_execution_sdk_python.types import SummaryGenerator
+
+
+Numeric = int | float  # deliberately leaving off complex
+
+
+@dataclass(frozen=True)
+class Duration:
+    """Represents a duration stored as total seconds."""
+
+    seconds: int = 0
+
+    def __post_init__(self) -> None:
+        if self.seconds < 0:
+            msg = "Duration seconds must be positive"
+            raise ValidationError(msg)
+
+    def to_seconds(self) -> int:
+        """Convert the duration to total seconds."""
+        return self.seconds
+
+    @classmethod
+    def from_seconds(cls, value: float) -> Duration:
+        """Create a Duration from total seconds."""
+        return cls(seconds=int(value))
+
+    @classmethod
+    def from_minutes(cls, value: float) -> Duration:
+        """Create a Duration from minutes."""
+        return cls(seconds=int(value * 60))
+
+    @classmethod
+    def from_hours(cls, value: float) -> Duration:
+        """Create a Duration from hours."""
+        return cls(seconds=int(value * 3600))
+
+    @classmethod
+    def from_days(cls, value: float) -> Duration:
+        """Create a Duration from days."""
+        return cls(seconds=int(value * 86400))
+
+
+class NestingType(Enum):
+    """Control how child contexts are created for batch operations.
+
+    Applies to `map` and `parallel`. Each branch or iteration runs inside a
+    child context.
+
+        - NESTED: full checkpointed context
+        - FLAT: a virtual context that skips checkpoints for the branch/iteration.
+
+    """
+
+    NESTED = "NESTED"
+    """Create CONTEXT operations for each branch/iteration with full checkpointing.
+
+    Operations within each branch/iteration are wrapped in their own context.
+
+    - Observability: high — each branch/iteration appears as a separate
+      operation in execution history.
+    - Cost: higher — consumes more operations due to CONTEXT creation
+      overhead.
+    - Scale: lower maximum iterations due to operation limits.
+    """
+
+    FLAT = "FLAT"
+    """Skip CONTEXT operations for branches/iterations using virtual contexts.
+
+    Operations execute directly without individual context wrapping.
+
+    - Observability: lower — branches/iterations don't appear as separate
+      operations in execution history.
+    - Cost: ~30% lower — reduces operation consumption by skipping CONTEXT
+      overhead.
+    - Scale: higher maximum iterations possible within operation limits.
+    """
+
+
+class BatchItemStatus(Enum):
+    """The status of a batch item in map/parallel operations."""
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    STARTED = "STARTED"
+
+
+class CompletionOutcome(Enum):
+    """Outcome of a custom completion decision.
+
+    Declares whether completing the batch now represents an overall success
+    or failure. This is a batch-level outcome, distinct from BatchItemStatus
+    which describes individual items.
+    """
+
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True)
+class CompletionDecision:
+    """Decision returned by a should_complete predicate.
+
+    Use the factory functions :func:`continue_batch` and
+    :func:`complete_batch` to construct instances.
+
+    Attributes:
+        complete: Whether to complete the batch now.
+        outcome: When complete is True, whether this completion represents
+            overall success or failure. None when complete is False.
+    """
+
+    complete: bool
+    outcome: CompletionOutcome | None = None
+
+    def __post_init__(self) -> None:
+        if self.complete and self.outcome is None:
+            msg = "outcome is required when complete is True"
+            raise ValidationError(msg)
+        if not self.complete and self.outcome is not None:
+            msg = "outcome must be None when complete is False"
+            raise ValidationError(msg)
+
+
+def continue_batch() -> CompletionDecision:
+    """Continue the batch - do not complete early."""
+    return CompletionDecision(complete=False)
+
+
+def complete_batch(
+    outcome: CompletionOutcome = CompletionOutcome.SUCCEEDED,
+) -> CompletionDecision:
+    """Complete the batch now with the given outcome (default SUCCEEDED)."""
+    return CompletionDecision(complete=True, outcome=outcome)
+
+
+@dataclass(frozen=True)
+class CompletionItemStatus:
+    """Status snapshot of a single branch/item in a batch operation.
+
+    Provided within :class:`CompletionStatus` so custom predicates can
+    inspect individual branch outcomes for quorum-style decisions.
+
+    Attributes:
+        index: The branch/item index (stable across replay).
+        name: Optional custom name of the branch/item, when one was provided.
+        status: Current status as a BatchItemStatus enum value, or None if
+            the branch has not been scheduled yet (common when max_concurrency
+            limits in-flight branches).
+    """
+
+    index: int
+    name: str | None = None
+    status: BatchItemStatus | None = None
+
+
+@dataclass(frozen=True)
+class CompletionStatus:
+    """Progress snapshot passed to a custom completion predicate.
+
+    Provided to the ``should_complete`` callable on each branch terminal
+    event so the predicate can decide whether the batch should finish early.
+
+    Attributes:
+        success_count: Number of branches that have completed successfully.
+        failure_count: Number of branches that have failed.
+        completed_count: Total terminal branches (success_count + failure_count).
+        total_count: Total number of branches in the batch.
+        items: Per-branch status snapshot ordered by original index. items[i]
+            is always the branch defined at position i, regardless of
+            completion order. Enables index-based quorum rules such as
+            "complete when branch 0 succeeds OR branches 1 and 2 both
+            succeed".
+    """
+
+    success_count: int
+    failure_count: int
+    completed_count: int
+    total_count: int
+    items: tuple[CompletionItemStatus, ...] = ()
+
+
+@dataclass(frozen=True)
+class CompletionConfig:
+    """Configuration for determining when parallel/map operations complete.
+
+    This class defines the success/failure criteria for operations that process
+    multiple items or branches concurrently.
+
+    Args:
+        min_successful: Minimum number of successful completions required.
+            If None, no minimum is enforced. Use this to implement "at least N
+            must succeed" semantics.
+
+        tolerated_failure_count: Maximum number of failures allowed before
+            the operation is considered failed. If None, no limit on failure count.
+            Use this to implement "fail fast after N failures" semantics.
+
+        tolerated_failure_percentage: Maximum percentage of failures allowed
+            (0.0 to 100.0). If None, no percentage limit is enforced.
+            Use this to implement "fail if more than X% fail" semantics.
+
+        should_complete: Optional predicate for custom completion logic.
+            Cannot be combined with threshold fields (min_successful,
+            tolerated_failure_count, tolerated_failure_percentage).
+
+            The predicate receives a CompletionStatus snapshot and returns a
+            CompletionDecision: either continue_batch() to keep going, or
+            complete_batch(outcome) to stop the batch now. The outcome
+            determines whether this completion represents overall success
+            (CUSTOM_COMPLETION_SUCCEEDED) or failure
+            (CUSTOM_COMPLETION_FAILED). A FAILED outcome marks the whole
+            batch as failed even when no individual item failed.
+
+            The predicate is evaluated during live execution: once before
+            any branch is scheduled (with completed_count == 0) and again
+            whenever branch state changes, including terminal and suspension
+            events. It must therefore handle the initial zero-progress
+            snapshot and never assume any item has completed. When a resumed
+            invocation finds the batch already completed, the recorded
+            completion outcome is replayed and the predicate is not called
+            again; otherwise the batch runs live and the predicate is
+            evaluated as described.
+
+            The predicate must be deterministic, side-effect-free, and depend
+            only on the CompletionStatus provided, never on external state. It
+            must also be monotonic: once a level of progress would complete
+            the batch, more progress must not flip the decision back to
+            continue (for example success_count >= n). Non-monotonic
+            predicates are not supported. On a mid-run resume the batch
+            re-runs live and already-completed branches replay in an
+            unspecified order, so the predicate may be evaluated on an
+            intermediate subset of the final progress; monotonicity is what
+            guarantees a subset cannot reach a different decision than the
+            full terminal set. The same race-condition caveat as the
+            threshold fields applies: when several items finish at once the
+            batch may end with slightly more completed items than the
+            predicate first observed.
+
+    Note:
+        The operation completes when any of the completion criteria are met:
+        - Custom predicate returns complete_batch() (when should_complete is provided)
+        - Enough successes (min_successful reached)
+        - Too many failures (tolerated limits exceeded)
+        - All items/branches completed
+
+    Example:
+        # Succeed if at least 3 succeed, fail if more than 2 fail
+        config = CompletionConfig(
+            min_successful=3,
+            tolerated_failure_count=2
+        )
+
+        # Custom predicate: stop once 2 successes are observed
+        config = CompletionConfig(
+            should_complete=lambda status: (
+                complete_batch() if status.success_count >= 2
+                else continue_batch()
+            )
+        )
+    """
+
+    min_successful: int | None = None
+    tolerated_failure_count: int | None = None
+    tolerated_failure_percentage: int | float | None = None
+    should_complete: Callable[[CompletionStatus], CompletionDecision] | None = None
+
+    def __post_init__(self) -> None:
+        if self.min_successful is not None and self.min_successful < 1:
+            msg = f"min_successful must be at least 1, got: {self.min_successful}"
+            raise ValidationError(msg)
+        if (
+            self.tolerated_failure_count is not None
+            and self.tolerated_failure_count < 0
+        ):
+            msg = (
+                "tolerated_failure_count must be non-negative, got: "
+                f"{self.tolerated_failure_count}"
+            )
+            raise ValidationError(msg)
+        if self.tolerated_failure_percentage is not None and not (
+            0 <= self.tolerated_failure_percentage <= 100  # noqa: PLR2004
+        ):
+            msg = (
+                "tolerated_failure_percentage must be between 0 and 100, got: "
+                f"{self.tolerated_failure_percentage}"
+            )
+            raise ValidationError(msg)
+        if self.should_complete is not None and not callable(self.should_complete):
+            msg = "should_complete must be callable"
+            raise ValidationError(msg)
+        if self.should_complete is not None and (
+            self.min_successful is not None
+            or self.tolerated_failure_count is not None
+            or self.tolerated_failure_percentage is not None
+        ):
+            msg = (
+                "should_complete cannot be combined with min_successful, "
+                "tolerated_failure_count, or tolerated_failure_percentage"
+            )
+            raise ValidationError(msg)
+
+    def _validate_for_total(self, total: int) -> None:
+        """Validate this config against the number of items it will govern.
+
+        SDK-internal: called by DurableContext.map and DurableContext.parallel
+        before the operation's child context starts, so the error surfaces as
+        a bare ValidationError (matching wait and wait_for_condition
+        validation) instead of a checkpointed operation failure.
+        """
+        if self.min_successful is not None and self.min_successful > total:
+            msg = (
+                f"min_successful cannot be greater than total items: "
+                f"{self.min_successful} > {total}"
+            )
+            raise ValidationError(msg)
+
+    # TODO: reevaluate this
+    # @staticmethod
+    # def first_completed():
+    #     return CompletionConfig(
+    #         min_successful=None, tolerated_failure_count=None, tolerated_failure_percentage=None
+    #     )
+
+    @staticmethod
+    def first_successful():
+        return CompletionConfig(
+            min_successful=1,
+            tolerated_failure_count=None,
+            tolerated_failure_percentage=None,
+        )
+
+    @staticmethod
+    def all_completed():
+        # 100% tolerated failures: every item runs regardless of failures.
+        # All-None fields would select the fail-fast default instead.
+        return CompletionConfig(
+            min_successful=None,
+            tolerated_failure_count=None,
+            tolerated_failure_percentage=100,
+        )
+
+    @staticmethod
+    def all_successful():
+        return CompletionConfig(
+            min_successful=None,
+            tolerated_failure_count=0,
+            tolerated_failure_percentage=0,
+        )
+
+
+@dataclass(frozen=True)
+class ParallelConfig:
+    """Configuration options for parallel execution operations.
+
+    This class configures how parallel operations are executed, including
+    concurrency limits, completion criteria, and serialization behavior.
+
+    Args:
+        max_concurrency: Maximum number of parallel branches to execute concurrently.
+            If None, no limit is imposed and all branches run concurrently.
+            Use this to control resource usage and prevent overwhelming the system.
+
+        completion_config: Defines when the parallel operation should complete.
+            Controls success/failure criteria for the overall parallel operation.
+            Default is CompletionConfig.all_successful() which requires all branches
+            to succeed. Other options include first_successful() and all_completed().
+
+        serdes: Custom serialization/deserialization configuration for BatchResult.
+            Applied at the handler level to serialize the entire BatchResult object.
+            If None, uses the default JSON serializer for BatchResult.
+
+            Backward Compatibility: If only 'serdes' is provided (no item_serdes),
+            it will be used for both individual functions AND BatchResult serialization
+            to maintain existing behavior.
+
+        item_serdes: Custom serialization/deserialization configuration for individual functions.
+            Applied to each function's result as tasks complete in child contexts.
+            If None, uses the default JSON serializer for individual function results.
+
+            When both 'serdes' and 'item_serdes' are provided:
+            - item_serdes: Used for individual function results in child contexts
+            - serdes: Used for the entire BatchResult at handler level
+
+        summary_generator: Function contributing a customer-facing summary for large
+            results (>256KB). When the serialized result exceeds CHECKPOINT_SIZE_LIMIT,
+            the SDK checkpoints a compact JSON payload instead of the full result and
+            marks the operation ReplayChildren=true so the full result is reconstructed
+            during replay. The SDK always writes the fields replay requires; the
+            generator's return value is stored verbatim under the payload's "summary"
+            key for observability and is never read by the SDK. The summary is
+            checkpointed as provided. An exception raised by the generator fails
+            the operation. Signature: (result: T) -> str
+
+        nesting_type: How child operations should inherit context from their parent.
+            - NESTED: Each branch runs in its own isolated context (default)
+            - FLAT: All branches share the same parent context
+
+    Example:
+        # Run at most 3 branches concurrently, succeed if any one succeeds
+        config = ParallelConfig(
+            max_concurrency=3,
+            completion_config=CompletionConfig.first_successful()
+        )
+    """
+
+    max_concurrency: int | None = None
+    completion_config: CompletionConfig = field(
+        default_factory=CompletionConfig.all_successful
+    )
+    serdes: SerDes | None = None
+    item_serdes: SerDes | None = None
+    summary_generator: SummaryGenerator | None = None
+    nesting_type: NestingType = NestingType.NESTED
+
+    def __post_init__(self) -> None:
+        if self.max_concurrency is not None and self.max_concurrency < 1:
+            msg = f"max_concurrency must be at least 1, got: {self.max_concurrency}"
+            raise ValidationError(msg)
+
+
+@dataclass(frozen=True)
+class ParallelBranch(Generic[T]):
+    """A named branch for parallel execution.
+
+    Use this to provide custom names for parallel branches, improving
+    observability in execution history.
+
+    Type Parameters:
+        T: The return type of the branch function.
+
+    Args:
+        func: The callable to execute in this branch. Receives a DurableContext.
+        name: Optional custom name for this branch. When provided, replaces
+            the default "parallel-branch-{index}" naming in execution history.
+            This affects observability but not replay determinism.
+
+    Example:
+        context.parallel(
+            functions=[
+                ParallelBranch(func=lambda ctx: fetch_user(ctx), name="fetch-user-data"),
+                ParallelBranch(func=lambda ctx: fetch_orders(ctx), name="fetch-order-history"),
+            ],
+            name="load-data",
+            config=ParallelConfig(max_concurrency=2),
+        )
+    """
+
+    func: Callable
+    name: str | None = None
+
+    def __call__(self, *args, **kwargs):
+        """Delegate to the wrapped function, making ParallelBranch itself callable."""
+        return self.func(*args, **kwargs)
+
+
+class StepSemantics(Enum):
+    AT_MOST_ONCE_PER_RETRY = "AT_MOST_ONCE_PER_RETRY"
+    AT_LEAST_ONCE_PER_RETRY = "AT_LEAST_ONCE_PER_RETRY"
+
+
+@dataclass(frozen=True)
+class StepConfig:
+    """Configuration for a step."""
+
+    retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
+    step_semantics: StepSemantics = StepSemantics.AT_LEAST_ONCE_PER_RETRY
+    serdes: SerDes | None = None
+
+
+@dataclass(frozen=True)
+class ChildConfig(Generic[T]):
+    """Configuration options for child context operations.
+
+    This class configures how child contexts are executed and checkpointed,
+    matching the TypeScript ChildConfig interface behavior.
+
+    Args:
+        serdes: Custom serialization/deserialization configuration for BatchResult.
+            Applied at the handler level to serialize the entire BatchResult object.
+            If None, uses the default JSON serializer for BatchResult.
+
+        sub_type: Operation subtype identifier used for tracking and debugging.
+            Examples: OperationSubType.MAP_ITERATION, OperationSubType.PARALLEL_BRANCH.
+            Used internally by the execution engine for operation classification.
+
+        summary_generator: Function generating the checkpoint payload for large
+            results (>256KB). When the serialized result exceeds CHECKPOINT_SIZE_LIMIT,
+            the SDK checkpoints the generator's output instead of the full result and
+            marks the operation ReplayChildren=true so the full result is reconstructed
+            during replay. The output is checkpointed as provided. For map and
+            parallel operations the SDK supplies a generator that writes the
+            completion-record envelope; see MapConfig and ParallelConfig. An
+            exception raised by the generator fails the operation.
+            Signature: (result: T) -> str
+
+        is_virtual: When True, skip all checkpoints (START, SUCCEED,
+            FAIL) for this child context and propagate the caller's reporting
+            parent id through to operations created inside the child. The
+            branch is a logical scope for step-id prefixing but does not
+            appear in the execution history. Used internally by
+            NestingType.FLAT branches. Use this to group operations without
+            adding a CONTEXT entry to the execution history.
+
+    See TypeScript reference: aws-durable-execution-sdk-js/src/types/index.ts
+    """
+
+    serdes: SerDes | None = None
+    sub_type: OperationSubType | None = None
+    summary_generator: SummaryGenerator | None = None
+    is_virtual: bool = False
+
+
+@dataclass(frozen=True)
+class MapConfig(Generic[T]):
+    """Configuration options for map operations over collections.
+
+    This class configures how map operations process collections of items,
+    including concurrency, completion criteria, and serialization.
+
+    Type Parameters:
+        T: The type of items being processed in the map operation.
+
+    Args:
+        max_concurrency: Maximum number of items to process concurrently.
+            If None, no limit is imposed and all items are processed concurrently.
+            Use this to control resource usage when processing large collections.
+
+        completion_config: Defines when the map operation should complete.
+            Controls success/failure criteria for the overall map operation.
+            The default fails fast: the first failed item fails the batch.
+            Use CompletionConfig.all_completed() to process every item
+            regardless of failures.
+
+        serdes: Custom serialization/deserialization configuration for BatchResult.
+            Applied at the handler level to serialize the entire BatchResult object.
+            If None, uses the default JSON serializer for BatchResult.
+
+            Backward Compatibility: If only 'serdes' is provided (no item_serdes),
+            it will be used for both individual items AND BatchResult serialization
+            to maintain existing behavior.
+
+        item_serdes: Custom serialization/deserialization configuration for individual items.
+            Applied to each item's result as tasks complete in child contexts.
+            If None, uses the default JSON serializer for individual items.
+
+            When both 'serdes' and 'item_serdes' are provided:
+            - item_serdes: Used for individual item results in child contexts
+            - serdes: Used for the entire BatchResult at handler level
+
+        summary_generator: Function contributing a customer-facing summary for large
+            results (>256KB). When the serialized result exceeds CHECKPOINT_SIZE_LIMIT,
+            the SDK checkpoints a compact JSON payload instead of the full result and
+            marks the operation ReplayChildren=true so the full result is reconstructed
+            during replay. The SDK always writes the fields replay requires; the
+            generator's return value is stored verbatim under the payload's "summary"
+            key for observability and is never read by the SDK. The summary is
+            checkpointed as provided. An exception raised by the generator fails
+            the operation. Signature: (result: T) -> str
+
+        nesting_type: How child operations should inherit context from their parent.
+            - NESTED: Each item runs in its own isolated context (default)
+            - FLAT: All items share the same parent context
+
+        item_namer: Optional callable to generate custom names for each map iteration.
+            When provided, replaces the default "map-item-{index}" naming scheme.
+            Receives the item and its index, and returns a string name for that
+            iteration. Called eagerly for every input when the map starts,
+            including items that never run due to early completion, and again
+            on every replay, so it must be deterministic and side-effect-free.
+            An exception raised by the callable fails the map operation.
+            If None, uses the default naming: "map-item-{index}".
+
+    Example:
+        # Process 5 items at a time, require all to succeed
+        config = MapConfig(
+            max_concurrency=5,
+            completion_config=CompletionConfig.all_successful()
+        )
+
+        # With custom iteration names
+        config = MapConfig(
+            max_concurrency=5,
+            item_namer=lambda item, index: f"process-order-{item.id}"
+        )
+    """
+
+    max_concurrency: int | None = None
+    completion_config: CompletionConfig = field(default_factory=CompletionConfig)
+    serdes: SerDes | None = None
+    item_serdes: SerDes | None = None
+    summary_generator: SummaryGenerator | None = None
+    nesting_type: NestingType = NestingType.NESTED
+    item_namer: Callable[[T, int], str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_concurrency is not None and self.max_concurrency < 1:
+            msg = f"max_concurrency must be at least 1, got: {self.max_concurrency}"
+            raise ValidationError(msg)
+
+
+@dataclass(frozen=True)
+class InvokeConfig(Generic[P, R]):
+    """
+    Configuration for invoke operations.
+
+    This class configures how function invocations are executed, including
+    serialization and tenant isolation.
+
+    Args:
+        serdes_payload: Custom serialization/deserialization for the payload
+            sent to the invoked function. Defaults to DEFAULT_JSON_SERDES when
+            not set.
+
+        serdes_result: Custom serialization/deserialization for the result
+            returned from the invoked function. Defaults to DEFAULT_JSON_SERDES when
+            not set.
+
+        tenant_id: Optional tenant identifier for multi-tenant isolation.
+            If provided, the invocation will be scoped to this tenant.
+    """
+
+    serdes_payload: SerDes[P] | None = None
+    serdes_result: SerDes[R] | None = None
+    tenant_id: str | None = None
+
+
+@dataclass(frozen=True)
+class CallbackConfig:
+    """Configuration for callbacks."""
+
+    timeout: Duration = field(default_factory=Duration)
+    heartbeat_timeout: Duration = field(default_factory=Duration)
+    serdes: SerDes | None = None
+
+    @property
+    def timeout_seconds(self) -> int:
+        """Get timeout in seconds."""
+        return self.timeout.to_seconds()
+
+    @property
+    def heartbeat_timeout_seconds(self) -> int:
+        """Get heartbeat timeout in seconds."""
+        return self.heartbeat_timeout.to_seconds()
+
+
+@dataclass(frozen=True)
+class WaitForCallbackConfig(CallbackConfig):
+    """Configuration for wait for callback."""
+
+    retry_strategy: Callable[[Exception, int], RetryDecision] | None = None
+
+
+# region Jitter
+
+
+class JitterStrategy(StrEnum):
+    """
+    Jitter strategies are used to introduce noise when attempting to retry
+    an invoke. We introduce noise to prevent a thundering-herd effect where
+    a group of accesses (e.g. invokes) happen at once.
+
+    Jitter is meant to be used to spread operations across time.
+
+    Based on AWS Architecture Blog: https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
+
+    members:
+        :NONE: No jitter; use the exact calculated delay
+        :FULL: Full jitter; random delay between 0 and calculated delay
+        :HALF: Equal jitter; random delay between 0.5x and 1.0x of the calculated delay
+    """
+
+    NONE = "NONE"
+    FULL = "FULL"
+    HALF = "HALF"
+
+    def apply_jitter(self, delay: float) -> float:
+        """Apply jitter to a delay value and return the final delay.
+
+        Args:
+            delay: The base delay value to apply jitter to
+
+        Returns:
+            The final delay after applying jitter strategy
+        """
+        match self:
+            case JitterStrategy.NONE:
+                return delay
+            case JitterStrategy.HALF:
+                # Equal jitter: delay/2 + random(0, delay/2)
+                return delay / 2 + random.random() * (delay / 2)  # noqa: S311
+            case _:  # default is FULL
+                # Full jitter: random(0, delay)
+                return random.random() * delay  # noqa: S311
+
+    def finalize_delay(self, base_delay: float) -> int:
+        """Apply jitter, round up, and clamp to a minimum of 1 second.
+
+        Args:
+            base_delay: The base delay value before jitter is applied
+
+        Returns:
+            The final delay in whole seconds, at least 1
+        """
+        return max(1, math.ceil(self.apply_jitter(base_delay)))
+
+
+# endregion Jitter

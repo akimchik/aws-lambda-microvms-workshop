@@ -1,0 +1,846 @@
+"""Concurrent executor for parallel and map operations."""
+
+from __future__ import annotations
+
+import heapq
+import logging
+import queue
+import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Generic, TypeVar, cast
+
+from aws_durable_execution_sdk_python.concurrency.models import (
+    BatchItem,
+    BatchResult,
+    Branch,
+    BranchEvent,
+    BranchEventKind,
+    BranchStatus,
+    CompletionPolicy,
+    CompletionReason,
+    CompletionRecord,
+    Executable,
+)
+from aws_durable_execution_sdk_python.config import (
+    BatchItemStatus,
+    ChildConfig,
+    CompletionDecision,
+    CompletionItemStatus,
+    NestingType,
+)
+from aws_durable_execution_sdk_python.exceptions import (
+    DurableOperationError,
+    ExecutionError,
+    InvalidStateError,
+    InvocationError,
+    NonDeterministicExecutionError,
+    OrphanedChildException,
+    SuspendExecution,
+    TimedSuspendExecution,
+)
+from aws_durable_execution_sdk_python.identifier import (
+    OperationIdentifier,
+    OperationIdNamespace,
+)
+from aws_durable_execution_sdk_python.lambda_service import ErrorObject
+from aws_durable_execution_sdk_python.operation.child import child_handler
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from aws_durable_execution_sdk_python.config import CompletionConfig
+    from aws_durable_execution_sdk_python.context import DurableContext
+    from aws_durable_execution_sdk_python.lambda_service import OperationSubType
+    from aws_durable_execution_sdk_python.serdes import SerDes
+    from aws_durable_execution_sdk_python.state import (
+        CheckpointedResult,
+        ExecutionState,
+        ScheduledRefresh,
+    )
+
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+CallableType = TypeVar("CallableType")
+ResultType = TypeVar("ResultType")
+
+
+def _branch_error_object(err: Exception) -> ErrorObject:
+    """Convert a failed branch's error for the batch result.
+
+    Records the raw escaping type so live results, branch FAIL checkpoints,
+    and replay reconstruction all carry the same discriminator;
+    ``from_exception`` on the ChildContextError wrapper would instead
+    record the wrapper class name.
+    """
+    if isinstance(err, DurableOperationError):
+        return ErrorObject(
+            message=err.message,
+            type=err.error_type,
+            data=err.data,
+            stack_trace=err.stack_trace,
+        )
+    return ErrorObject.from_exception(err)
+
+
+@dataclass
+class ResumeWave(Generic[CallableType, ResultType]):
+    """Branches suspended until one time, and the refresh that resumes them.
+
+    The refresh is a delayed empty checkpoint requested when the first branch
+    suspends. Its response shows the waits complete, so the wave resumes one
+    round trip after its time.
+    """
+
+    resume_at: float
+    refresh: ScheduledRefresh
+    branches: list[Branch[CallableType, ResultType]] = field(default_factory=list)
+
+
+class ConcurrentExecutor(Generic[CallableType, ResultType]):
+    """Execute durable operations concurrently. This contains the execution logic for Map and Parallel.
+
+    Scheduling model: a single coordinator loop runs on the calling thread
+    and owns all branch state. Worker threads run branches and report each
+    outcome as a :class:`BranchEvent` on a queue; they never mutate shared
+    state, so the module needs no locks.
+
+    ``max_concurrency`` bounds in-flight branches, not threads. A branch
+    that suspends (e.g. awaiting an invoke result or callback) keeps its
+    concurrency slot until it reaches a terminal state. New branches start
+    only when a slot frees up. When every in-flight branch is suspended and
+    no slot is available, the parent suspends too: with the earliest resume
+    timestamp when one exists, indefinitely otherwise.
+
+    Branches are always started in index order and operation ids derive
+    from the branch index, so scheduling is deterministic across
+    invocations. On re-invocation the previously started branches are
+    admitted first and replay from their checkpoints.
+    """
+
+    def __init__(
+        self,
+        executables: list[Executable[CallableType]],
+        max_concurrency: int | None,
+        completion_config: CompletionConfig,
+        sub_type_top: OperationSubType,
+        sub_type_iteration: OperationSubType,
+        name_prefix: str,
+        serdes: SerDes | None,
+        operation_id_namespace: OperationIdNamespace,
+        item_serdes: SerDes | None = None,
+        nesting_type: NestingType = NestingType.NESTED,
+    ):
+        self.executables = executables
+        self.operation_id_namespace = operation_id_namespace
+        self.max_concurrency = max_concurrency
+        self.completion_config = completion_config
+        self.sub_type_top = sub_type_top
+        self.sub_type_iteration = sub_type_iteration
+        self.name_prefix = name_prefix
+        self.nesting_type = nesting_type
+        self.serdes = serdes
+        self.item_serdes = item_serdes
+
+        self.policy: CompletionPolicy = CompletionPolicy.from_config(
+            len(executables), completion_config
+        )
+        self.branches: list[Branch[CallableType, ResultType]] = []
+
+    def execute_item(  # noqa: PLR6301
+        self, child_context: DurableContext, executable: Executable[CallableType]
+    ) -> ResultType:
+        """Execute a single executable in a child context and return the result."""
+        logger.debug("▶️ Processing branch: %s", executable.index)
+        func = cast("Callable[[DurableContext], ResultType]", executable.func)
+        result: ResultType = func(child_context)
+        logger.debug("✅ Processed branch: %s", executable.index)
+        return result
+
+    def get_iteration_name(self, index: int) -> str:
+        """Get the display name for an iteration/branch at the given index.
+
+        Returns the Executable's bound name when present, else
+        "{name_prefix}{index}". An explicitly provided empty name is
+        preserved.
+        """
+        name: str | None = self.executables[index].name
+        return name if name is not None else f"{self.name_prefix}{index}"
+
+    def _get_iteration_operation_identifier(
+        self,
+        executor_context: DurableContext,
+        executable: Executable[CallableType],
+    ) -> OperationIdentifier:
+        """Build the stable operation identity for one branch or iteration."""
+        return OperationIdentifier(
+            operation_id=self.operation_id_namespace.create_id_for_step(
+                executable.index
+            ),
+            sub_type=self.sub_type_iteration,
+            parent_id=executor_context._parent_id,  # noqa: SLF001
+            name=self.get_iteration_name(executable.index),
+        )
+
+    def _validate_branch_checkpoint_nesting(
+        self,
+        operation_identifier: OperationIdentifier,
+        checkpoint: CheckpointedResult,
+    ) -> None:
+        """Validate branch identity and reject NESTED history in FLAT mode."""
+        operation_identifier.validate_checkpoint(checkpoint.operation)
+        if self.nesting_type is NestingType.FLAT and checkpoint.is_existent():
+            msg = (
+                "Non-deterministic branch nesting at "
+                f"id={operation_identifier.operation_id!r}: "
+                "checkpoint contains a NESTED branch context but current "
+                "nesting is FLAT"
+            )
+            raise NonDeterministicExecutionError(
+                msg, step_id=operation_identifier.operation_id
+            )
+
+    def _build_items_snapshot(self) -> tuple[CompletionItemStatus, ...]:
+        """Build the per-branch status snapshot for the custom predicate.
+
+        Only called when a should_complete predicate is active. Returns a
+        tuple ordered by branch index so items[i] is the branch at position i.
+        Distinguishes None (not yet scheduled) from STARTED (running or
+        suspended) so predicates can reason about scheduling state.
+        """
+        snapshot: list[CompletionItemStatus] = []
+        for branch in self.branches:
+            name: str | None = self.executables[branch.index].name
+            if branch.status is BranchStatus.COMPLETED:
+                snapshot.append(
+                    CompletionItemStatus(
+                        index=branch.index,
+                        status=BatchItemStatus.SUCCEEDED,
+                        name=name,
+                    )
+                )
+            elif branch.status is BranchStatus.FAILED:
+                snapshot.append(
+                    CompletionItemStatus(
+                        index=branch.index,
+                        status=BatchItemStatus.FAILED,
+                        name=name,
+                    )
+                )
+            elif branch.status is BranchStatus.PENDING:
+                snapshot.append(
+                    CompletionItemStatus(
+                        index=branch.index,
+                        status=None,
+                        name=name,
+                    )
+                )
+            else:
+                # RUNNING, SUSPENDED, SUSPENDED_WITH_TIMEOUT
+                snapshot.append(
+                    CompletionItemStatus(
+                        index=branch.index,
+                        status=BatchItemStatus.STARTED,
+                        name=name,
+                    )
+                )
+        return tuple(snapshot)
+
+    def execute(
+        self, execution_state: ExecutionState, executor_context: DurableContext
+    ) -> BatchResult[ResultType]:
+        """Run the coordinator loop until the batch completes or suspends."""
+        logger.debug(
+            "▶️ Executing concurrent operation, items: %d", len(self.executables)
+        )
+
+        if not self.executables:
+            logger.debug("No items to execute, returning empty result")
+            return self._create_result()
+
+        max_in_flight: int = self.max_concurrency or len(self.executables)
+        self.branches = [Branch(executable=exe) for exe in self.executables]
+
+        events: queue.Queue[BranchEvent[ResultType]] = queue.Queue()
+        pending: deque[Branch[CallableType, ResultType]] = deque(self.branches)
+        # The heap orders resume times. The dict groups the branches under each.
+        resume_times: list[float] = []
+        waves: dict[float, ResumeWave[CallableType, ResultType]] = {}
+        branch_by_index: dict[int, Branch[CallableType, ResultType]] = {
+            branch.index: branch for branch in self.branches
+        }
+
+        in_flight: int = 0
+        running: int = 0
+        succeeded: int = 0
+        failed: int = 0
+        # A retryable branch error, re-raised after the drain (or before
+        # suspension) so the invocation fails and the backend retries rather
+        # than recording a permanent item.
+        retryable_error: InvocationError | None = None
+
+        pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=max_in_flight)
+        # Registered so ExecutionState.close() joins any branches still
+        # running after early completion before the invocation returns.
+        execution_state.register_branch_pool(pool)
+
+        def submit(branch: Branch[CallableType, ResultType]) -> None:
+            branch.start()
+            pool.submit(
+                self._branch_worker,
+                execution_state,
+                executor_context,
+                events,
+                branch.executable,
+            )
+
+        try:
+            # Only rebuild the items snapshot after a terminal event changes
+            # branch state, not after timeouts/resumes with no status change.
+            needs_snapshot_rebuild: bool = True
+            items_snapshot: tuple[CompletionItemStatus, ...] = ()
+            # The custom predicate result for the current snapshot. Evaluated
+            # once per state change and reused for both the completion check
+            # and the reason, so user code runs at most once per change.
+            decision: CompletionDecision | None = None
+            while True:
+                if needs_snapshot_rebuild:
+                    items_snapshot = (
+                        self._build_items_snapshot()
+                        if self.policy.should_complete is not None
+                        else ()
+                    )
+                    decision = self.policy.evaluate(succeeded, failed, items_snapshot)
+                    needs_snapshot_rebuild = False
+                if self.policy.is_complete(succeeded, failed, items_snapshot, decision):
+                    break
+                if not self.policy.should_continue(failed):
+                    break
+
+                # Start branches in index order up to the in-flight limit.
+                # Suspended branches keep their slot: in_flight only
+                # decreases on terminal events.
+                while (
+                    pending
+                    and in_flight < max_in_flight
+                    and self.policy.should_continue(failed)
+                ):
+                    submit(pending.popleft())
+                    in_flight += 1
+                    running += 1
+                    needs_snapshot_rebuild = True
+
+                # Resume due waves in-process. A refresh failure is terminal
+                # for the execution and propagates from this thread.
+                now: float = time.time()
+                resumed = False
+                while resume_times and resume_times[0] <= now:
+                    wave = waves.pop(heapq.heappop(resume_times))
+                    wave.refresh.wait()
+                    # Branches joined the wave in event order. Resume in index
+                    # order so scheduling stays deterministic.
+                    for branch in sorted(wave.branches, key=lambda b: b.index):
+                        submit(branch)
+                        running += 1
+                    resumed = True
+                if resumed:
+                    continue
+
+                if running == 0:
+                    # A retryable error takes priority over suspension: fail
+                    # the invocation so the backend retries rather than
+                    # returning PENDING while a retryable failure is pending.
+                    if retryable_error is not None:
+                        raise retryable_error
+                    # Every in-flight branch is suspended and no slot is
+                    # free (or no work remains): suspend the parent.
+                    if resume_times:
+                        raise TimedSuspendExecution(
+                            "All concurrent work complete or suspended pending retry.",
+                            resume_times[0],
+                        )
+                    raise SuspendExecution(
+                        "All concurrent work complete or suspended and pending external callback."
+                    )
+
+                timeout: float | None = None
+                if resume_times:
+                    timeout = max(resume_times[0] - time.time(), 0)
+                try:
+                    event: BranchEvent[ResultType] = events.get(timeout=timeout)
+                except queue.Empty:
+                    # A timed resume came due while branches were running.
+                    continue
+
+                applied: Branch[CallableType, ResultType] = branch_by_index[event.index]
+                match event.kind:
+                    case BranchEventKind.COMPLETED:
+                        applied.complete(event.result)
+                        succeeded += 1
+                        running -= 1
+                        in_flight -= 1
+                        needs_snapshot_rebuild = True
+                    case BranchEventKind.FAILED if event.error is not None:
+                        applied.fail(event.error)
+                        failed += 1
+                        running -= 1
+                        in_flight -= 1
+                        needs_snapshot_rebuild = True
+                        if (
+                            isinstance(event.error, InvocationError)
+                            and event.error.is_retryable()
+                        ):
+                            retryable_error = event.error
+                    case BranchEventKind.SUSPENDED:
+                        applied.suspend()
+                        running -= 1
+                        needs_snapshot_rebuild = True
+                    case BranchEventKind.SUSPENDED_UNTIL if event.resume_at is not None:
+                        applied.suspend_until(event.resume_at)
+                        if event.resume_at not in waves:
+                            waves[event.resume_at] = ResumeWave(
+                                event.resume_at,
+                                execution_state.schedule_refresh(event.resume_at),
+                            )
+                            heapq.heappush(resume_times, event.resume_at)
+                        waves[event.resume_at].branches.append(applied)
+                        running -= 1
+                        needs_snapshot_rebuild = True
+                    case BranchEventKind.ORPHANED:
+                        # An ancestor context already checkpointed terminal, so
+                        # every further checkpoint under it is rejected. Stop
+                        # scheduling: the result of this batch is discarded
+                        # upstream by the same orphan mechanism.
+                        break
+                    case BranchEventKind.FATAL if event.fatal_error is not None:
+                        # System-level failure: propagate immediately without
+                        # counting a branch failure or checkpointing further.
+                        raise event.fatal_error
+                    case _:
+                        # A dropped event would leave the counters stale and
+                        # hang the coordinator, so fail loudly instead.
+                        msg = f"Unhandled branch event: {event}"
+                        raise InvalidStateError(msg)
+        finally:
+            # Nothing will wait for a refresh whose wave never resumed.
+            for wave in waves.values():
+                wave.refresh.cancel()
+            # Shutdown without waiting for running threads for early return
+            # when completion criteria are met (e.g., min_successful).
+            # Running threads continue in the background of this invocation
+            # and raise OrphanedChildException on their next attempt to
+            # checkpoint. ExecutionState.close() joins them before the
+            # invocation returns, so no branch thread outlives the
+            # invocation.
+            pool.shutdown(wait=False, cancel_futures=True)
+
+        # The state that ended the loop determines the reason. Computed from
+        # the loop-exit counts, snapshot, and predicate decision - all before
+        # the drain, so raced terminal events update item statuses without
+        # flipping the reason (and the recorded summary) to a decision that
+        # never fired. Reusing decision avoids re-evaluating the predicate.
+        completion_reason: CompletionReason = self.policy.reason(
+            succeeded, failed, items_snapshot, decision
+        )
+
+        # Apply terminal events that raced the completion decision, so a
+        # branch that finished just before the batch completed is reported
+        # with its true status instead of STARTED. Best effort: events from
+        # still-running branches that arrive later are not waited for.
+        while True:
+            try:
+                raced: BranchEvent[ResultType] = events.get_nowait()
+            except queue.Empty:
+                break
+            raced_branch: Branch[CallableType, ResultType] = branch_by_index[
+                raced.index
+            ]
+            if raced.kind is BranchEventKind.COMPLETED:
+                raced_branch.complete(raced.result)
+            elif raced.kind is BranchEventKind.FAILED and raced.error is not None:
+                raced_branch.fail(raced.error)
+                if (
+                    isinstance(raced.error, InvocationError)
+                    and raced.error.is_retryable()
+                ):
+                    retryable_error = raced.error
+            elif raced.kind is BranchEventKind.FATAL and raced.fatal_error is not None:
+                # A straggler hit a system-level failure after the completion
+                # decision. The same failure would reject the parent's own
+                # checkpoint, so propagate instead of returning a result.
+                raise raced.fatal_error
+
+        # Re-raise a retryable branch error so the whole invocation fails and
+        # the backend retries, instead of returning a batch that records it as a
+        # permanent failed item.
+        if retryable_error is not None:
+            raise retryable_error
+
+        return self._create_result(completion_reason)
+
+    def _create_result(
+        self, completion_reason: CompletionReason | None = None
+    ) -> BatchResult[ResultType]:
+        """Build the final BatchResult from branch states.
+
+        Branches map to batch items by status: COMPLETED and FAILED map to
+        their terminal statuses, anything started but not terminal maps to
+        STARTED. Never-started branches (still PENDING) are omitted,
+        matching the TypeScript implementation.
+
+        The completion reason is the one captured when the completion
+        decision fired. When absent it is computed from the branch states
+        against the true batch total.
+        """
+        succeeded: int = 0
+        failed: int = 0
+        batch_items: list[BatchItem[ResultType]] = []
+        for branch in self.branches:
+            match branch.status:
+                case BranchStatus.COMPLETED:
+                    succeeded += 1
+                    batch_items.append(
+                        BatchItem(
+                            branch.index,
+                            BatchItemStatus.SUCCEEDED,
+                            branch.result,
+                        )
+                    )
+                case BranchStatus.FAILED if branch.error is not None:
+                    failed += 1
+                    batch_items.append(
+                        BatchItem(
+                            branch.index,
+                            BatchItemStatus.FAILED,
+                            error=_branch_error_object(branch.error),
+                        )
+                    )
+                case (
+                    BranchStatus.RUNNING
+                    | BranchStatus.SUSPENDED
+                    | BranchStatus.SUSPENDED_WITH_TIMEOUT
+                ):
+                    batch_items.append(BatchItem(branch.index, BatchItemStatus.STARTED))
+                case BranchStatus.PENDING:
+                    pass
+                case _:
+                    # A silently skipped branch would shrink a
+                    # customer-visible result, so fail loudly instead.
+                    msg = f"Branch {branch.index} in unexpected state {branch.status}"
+                    raise InvalidStateError(msg)
+
+        if completion_reason is None:
+            # Fallback: supply items snapshot so quorum predicates work here too.
+            fallback_items: tuple[CompletionItemStatus, ...] = (
+                self._build_items_snapshot()
+                if self.policy.should_complete is not None
+                else ()
+            )
+            completion_reason = self.policy.reason(succeeded, failed, fallback_items)
+        return BatchResult(batch_items, completion_reason)
+
+    def _branch_worker(
+        self,
+        execution_state: ExecutionState,
+        executor_context: DurableContext,
+        events: queue.Queue[BranchEvent[ResultType]],
+        executable: Executable[CallableType],
+    ) -> None:
+        """Worker-thread body: run one branch and report its outcome.
+
+        Converts every outcome into a :class:`BranchEvent` on the queue. Fatal
+        errors are also re-raised into the pool after posting their event; the
+        coordinator loop consumes the event and propagates the error on the
+        calling thread.
+        """
+        try:
+            result: ResultType = self._execute_item_in_child_context(
+                executor_context, executable
+            )
+        except TimedSuspendExecution as tse:
+            events.put(
+                BranchEvent.suspended_until(executable.index, tse.scheduled_timestamp)
+            )
+        except SuspendExecution:
+            events.put(BranchEvent.suspended(executable.index))
+        except OrphanedChildException:
+            # Parent already completed and returned; the branch stays
+            # RUNNING and is reported as STARTED.
+            logger.debug(
+                "Terminating orphaned branch %s without error because parent has completed already",
+                executable.index,
+            )
+            events.put(BranchEvent.orphaned(executable.index))
+        except ExecutionError as e:
+            # Execution-terminal SDK errors (including nondeterminism) must
+            # bypass branch failure tolerance and custom completion policies.
+            parent_operation_id: str | None = executor_context._parent_id  # noqa: SLF001
+            if (
+                parent_operation_id is not None
+                and execution_state.record_branch_fatal_error(parent_operation_id, e)
+                is False
+            ):
+                logger.debug(
+                    "Ignoring fatal error from orphaned branch %s",
+                    executable.index,
+                )
+                return
+            events.put(BranchEvent.fatal(executable.index, e))
+            raise
+        except Exception as e:  # noqa: BLE001
+            # A retryable error (e.g. RetryableSerDesError) escapes the batch:
+            # the coordinator re-raises it so the invocation fails and the
+            # backend retries, instead of it becoming a permanent failed item.
+            # Other errors are ordinary branch failures.
+            events.put(BranchEvent.failed(executable.index, e))
+        except BaseException as e:
+            # System-level failure (background checkpoint failure, SystemExit).
+            # Post a fatal event so the coordinator re-raises it on the
+            # calling thread instead of blocking forever on the queue, then
+            # let the exception propagate to the worker thread.
+            parent_operation_id = executor_context._parent_id  # noqa: SLF001
+            if (
+                parent_operation_id is not None
+                and execution_state.record_branch_fatal_error(parent_operation_id, e)
+                is False
+            ):
+                logger.debug(
+                    "Ignoring fatal error from orphaned branch %s",
+                    executable.index,
+                )
+                return
+            events.put(BranchEvent.fatal(executable.index, e))
+            raise
+        else:
+            events.put(BranchEvent.completed(executable.index, result))
+
+    def _execute_item_in_child_context(
+        self,
+        executor_context: DurableContext,
+        executable: Executable[CallableType],
+    ) -> ResultType:
+        """
+        Execute a single item in a derived child context.
+
+        Instead of relying on `executor_context.run_in_child_context` we
+        generate an operation_id for the child, then call `child_handler`
+        directly. This avoids the hidden mutation of the context's
+        internal counter. We explicitly derive the child's operation_id
+        from `executable.index` so that the same input always produces
+        the same id regardless of the order branches actually run in.
+
+        Invariant: `operation_id` for a given executable is deterministic
+        and execution-order invariant.
+        """
+
+        operation_identifier = self._get_iteration_operation_identifier(
+            executor_context, executable
+        )
+        operation_id = operation_identifier.operation_id
+        is_virtual: bool = self.nesting_type is NestingType.FLAT
+
+        child_context: DurableContext = executor_context.create_child_context(
+            operation_id, is_virtual=is_virtual
+        )
+        # For NESTED this is for branch's START/SUCCEED/FAIL checkpoints (not the children of the branch).
+        # For FLAT `child_handler` skips checkpoints, so not used.
+        # Construct it unconditionally to keep the call simple.
+        # The branch/iteration container op is resolved here via child_handler,
+        # bypassing context.run_in_child_context and therefore the parent's
+        # `_replay_aware`. Replicate the two things `_replay_aware` would have
+        # done for this container op while replaying:
+        #   1. Existence flip: a brand-new branch (no checkpoint) is new work,
+        #      so the child must start in NEW rather than inheriting REPLAY —
+        #      otherwise logs before the branch's first inner op are wrongly
+        #      de-duplicated during a map/parallel replay.
+        #   2. Replay hook: a branch that already has a checkpoint was observed
+        #      in a prior invocation, so emit the plugin replay hook (once).
+        # Virtual (FLAT) branches do not checkpoint themselves. Therefore an
+        # existing branch-container checkpoint proves that replay changed from
+        # NESTED and must be rejected before child_handler can consume it.
+        if child_context.is_replaying():
+            branch_checkpoint = child_context.state.get_checkpoint_result(
+                operation_identifier.operation_id
+            )
+            if is_virtual:
+                self._validate_branch_checkpoint_nesting(
+                    operation_identifier, branch_checkpoint
+                )
+            elif not branch_checkpoint.is_existent():
+                child_context._set_replay_status_new()  # noqa: SLF001
+            elif branch_checkpoint.operation is not None:
+                operation_identifier.validate_checkpoint(branch_checkpoint.operation)
+                child_context.state.emit_operation_replay_hook(
+                    branch_checkpoint.operation
+                )
+
+        def run_in_child_handler() -> ResultType:
+            return self.execute_item(child_context, executable)
+
+        result: ResultType = child_handler(
+            run_in_child_handler,
+            child_context.state,
+            operation_identifier=operation_identifier,
+            config=ChildConfig(
+                serdes=self.item_serdes or self.serdes,
+                sub_type=self.sub_type_iteration,
+                is_virtual=is_virtual,
+            ),
+        )
+        return result
+
+    def replay(
+        self,
+        execution_state: ExecutionState,
+        executor_context: DurableContext,
+        checkpointed_result: CheckpointedResult | None = None,
+    ) -> BatchResult[ResultType]:
+        """Reconstruct the batch result while in replay_children mode.
+
+        When the operation's summary carries a recorded completion decision,
+        the reconstruction obeys it so the result matches the live result
+        exactly: branches recorded STARTED are reported STARTED without
+        consulting child checkpoints, branches past the started prefix are
+        omitted, terminal branches are re-derived, and the completion
+        reason is the recorded value verbatim.
+
+        Summaries without a record (checkpoints written before the record
+        existed) fall back to deriving every branch from its child
+        checkpoint.
+        """
+        record: CompletionRecord | None = CompletionRecord.from_summary_payload(
+            checkpointed_result.result if checkpointed_result else None
+        )
+        if record is None:
+            return self._replay_from_checkpoints(execution_state, executor_context)
+
+        items: list[BatchItem[ResultType]] = []
+        for executable in self.executables:
+            if executable.index >= record.started_total:
+                continue
+            if executable.index in record.started_indexes:
+                operation_identifier = self._get_iteration_operation_identifier(
+                    executor_context, executable
+                )
+                checkpoint = execution_state.get_checkpoint_result(
+                    operation_identifier.operation_id
+                )
+                self._validate_branch_checkpoint_nesting(
+                    operation_identifier, checkpoint
+                )
+                items.append(BatchItem(executable.index, BatchItemStatus.STARTED))
+                continue
+            items.append(
+                self._replay_terminal_item(
+                    execution_state, executor_context, executable
+                )
+            )
+        return BatchResult(items, record.completion_reason)
+
+    def _replay_terminal_item(
+        self,
+        execution_state: ExecutionState,
+        executor_context: DurableContext,
+        executable: Executable[CallableType],
+    ) -> BatchItem[ResultType]:
+        """Re-derive one branch recorded as terminal.
+
+        Non-virtual branches have a terminal checkpoint: terminal branch
+        events are only emitted after the synchronous SUCCEED/FAIL
+        checkpoint call returned. Virtual (FLAT) branches never checkpoint
+        themselves, so re-executing the branch body over its inner
+        operations' checkpoints discriminates success from failure.
+        """
+        operation_identifier = self._get_iteration_operation_identifier(
+            executor_context, executable
+        )
+        checkpoint: CheckpointedResult = execution_state.get_checkpoint_result(
+            operation_identifier.operation_id
+        )
+        self._validate_branch_checkpoint_nesting(operation_identifier, checkpoint)
+        if self.nesting_type is NestingType.NESTED and not checkpoint.is_terminal():
+            checkpoint_status = (
+                checkpoint.status.value if checkpoint.status is not None else None
+            )
+            msg = (
+                "Non-deterministic branch nesting at "
+                f"id={operation_identifier.operation_id!r}: "
+                "recorded terminal branch requires a terminal NESTED branch "
+                f"context checkpoint, got status={checkpoint_status!r}"
+            )
+            raise NonDeterministicExecutionError(
+                msg, step_id=operation_identifier.operation_id
+            )
+        if checkpoint.is_succeeded():
+            result: ResultType = self._execute_item_in_child_context(
+                executor_context, executable
+            )
+            return BatchItem(executable.index, BatchItemStatus.SUCCEEDED, result)
+        if checkpoint.is_failed():
+            return BatchItem(
+                executable.index, BatchItemStatus.FAILED, error=checkpoint.error
+            )
+        if self.nesting_type is NestingType.FLAT:
+            try:
+                flat_result: ResultType = self._execute_item_in_child_context(
+                    executor_context, executable
+                )
+            except ExecutionError:
+                # Nondeterminism and other execution-terminal SDK errors must
+                # not be downgraded to a failed FLAT item.
+                raise
+            except Exception as e:  # noqa: BLE001
+                if isinstance(e, InvocationError) and e.is_retryable():
+                    # Escape the batch so the invocation fails and the backend
+                    # retries, matching the live path.
+                    raise
+                return BatchItem(
+                    executable.index,
+                    BatchItemStatus.FAILED,
+                    error=_branch_error_object(e),
+                )
+            return BatchItem(executable.index, BatchItemStatus.SUCCEEDED, flat_result)
+        return BatchItem(executable.index, BatchItemStatus.STARTED)
+
+    def _replay_from_checkpoints(
+        self, execution_state: ExecutionState, executor_context: DurableContext
+    ) -> BatchResult[ResultType]:
+        """Derive every branch from its child checkpoint.
+
+        Fallback reconstruction for summaries that carry no completion
+        record. Every executable is represented, matching the live results
+        that predate the recorded decision.
+        """
+        items: list[BatchItem[ResultType]] = []
+        for executable in self.executables:
+            operation_identifier = self._get_iteration_operation_identifier(
+                executor_context, executable
+            )
+            checkpoint = execution_state.get_checkpoint_result(
+                operation_identifier.operation_id
+            )
+            self._validate_branch_checkpoint_nesting(operation_identifier, checkpoint)
+
+            result: ResultType | None = None
+            error = None
+            status: BatchItemStatus
+            if checkpoint.is_succeeded():
+                status = BatchItemStatus.SUCCEEDED
+                result = self._execute_item_in_child_context(
+                    executor_context, executable
+                )
+
+            elif checkpoint.is_failed():
+                error = checkpoint.error
+                status = BatchItemStatus.FAILED
+            else:
+                status = BatchItemStatus.STARTED
+
+            batch_item = BatchItem(executable.index, status, result=result, error=error)
+            items.append(batch_item)
+        return BatchResult.from_items(items, self.completion_config)

@@ -1,0 +1,26 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Resources:
+  OrchestratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Ref FunctionName
+      CodeUri: .
+      Handler: lambda_function.handler
+      Runtime: python3.11
+      Role: !Ref OrchestratorRoleArn
+      Environment:
+        Variables:
+          IMAGE_ARN: !Ref ImageArn
+      AutoPublishAlias: live
+      Timeout: 30
+
+Parameters:
+  FunctionName:
+    Type: String
+    Default: ci-runner-orchestrator
+  OrchestratorRoleArn:
+    Type: String
+  ImageArn:
+    Type: String

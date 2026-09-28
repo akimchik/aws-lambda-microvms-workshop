@@ -1,0 +1,42 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  ControlPlaneApi:
+    Type: AWS::Serverless::HttpApi
+  ControlPlaneFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: saas-control-plane
+      CodeUri: ControlPlaneFunction
+      Handler: lambda_function.handler
+      Runtime: python3.11
+      Role:
+        Ref: OrchestratorRoleArn
+      Environment:
+        Variables:
+          IMAGE_ARN:
+            Ref: ImageArn
+          MVM_EXECUTION_ROLE_ARN:
+            Ref: ExecutionRoleArn
+      Timeout: 30
+      Events:
+        ProxyApi:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: ControlPlaneApi
+            Path: /{proxy+}
+            Method: ANY
+    Metadata:
+      SamResourceId: ControlPlaneFunction
+Outputs:
+  ControlPlaneUrl:
+    Value:
+      Fn::Sub: https://${ControlPlaneApi}.execute-api.${AWS::Region}.amazonaws.com
+Parameters:
+  OrchestratorRoleArn:
+    Type: String
+  ImageArn:
+    Type: String
+  ExecutionRoleArn:
+    Type: String

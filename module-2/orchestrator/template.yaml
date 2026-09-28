@@ -1,0 +1,25 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Resources:
+  DurableOrchestratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Ref FunctionName
+      CodeUri: .
+      Handler: lambda_function.handler
+      Runtime: python3.11
+      Role: !Ref DurableOrchestratorRoleArn
+      Environment:
+        Variables:
+          IMAGE_ARN: !Ref ImageArn
+      AutoPublishAlias: live
+
+Parameters:
+  FunctionName:
+    Type: String
+    Default: durable-orchestrator
+  DurableOrchestratorRoleArn:
+    Type: String
+  ImageArn:
+    Type: String

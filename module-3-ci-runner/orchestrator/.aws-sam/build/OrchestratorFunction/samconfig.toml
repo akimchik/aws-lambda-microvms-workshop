@@ -1,0 +1,6 @@
+version = 0.1
+[default.deploy.parameters]
+stack_name = "ci-runner-orchestrator"
+resolve_s3 = true
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
