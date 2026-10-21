@@ -1,0 +1,55 @@
+# values-mogenius.yaml
+# Production configuration for mogenius/mogenius-agent-sandbox with gVisor runtime
+
+controller:
+  replicaCount: 1
+  extensions: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+sandboxes:
+  namespace:
+    name: agent-sandbox
+    create: true
+  serviceAccount:
+    name: sandbox-runtime
+    create: true
+  # Global runtime class for all sandboxes: gVisor (runsc)
+  runtimeClassName: gvisor
+  service: true
+  networkPolicy:
+    managed: true
+    blockedCidrs:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 169.254.0.0/16
+  profiles:
+    default:
+      enabled: true
+      image: ghcr.io/mogenius/agent-sandbox-chart/sandbox-default:1.2.1
+      imagePullPolicy: IfNotPresent
+      containerName: sandbox
+      port: 8080
+      probes:
+        enabled: true
+        path: /healthz
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+          ephemeral-storage: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+      storage:
+        enabled: true
+        size: 1Gi
+        mountPath: /home/coder/project
+      warmPool:
+        replicas: 1
+        updateStrategy: OnReplenish
