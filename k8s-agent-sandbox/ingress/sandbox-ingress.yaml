@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sandbox-ingress
+  namespace: agent-sandbox-system
+  annotations:
+    ingress.class: nginx
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: sandbox.127.0.0.1.nip.io
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: sandbox-router
+            port:
+              number: 8080
+  - host: sandbox.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: sandbox-router
+            port:
+              number: 8080

@@ -6,7 +6,7 @@ This runbook contains step-by-step instructions to run a live demo comparing **A
 
 ## 📋 Prerequisites & Health Check
 
-Ensure your local cluster and gVisor runtime are ready:
+Ensure your local cluster, gVisor runtime, Ingress, and Observability stack are ready:
 
 ```bash
 # 1. Verify Minikube is running
@@ -15,12 +15,68 @@ minikube status
 # 2. Verify gVisor runtime class exists
 kubectl get runtimeclass gvisor
 
-# 3. Verify mogenius-agent-sandbox controller and warm pool are healthy
+# 3. Verify mogenius-agent-sandbox controller, warm pool, and router
 kubectl -n agent-sandbox-system get pods
 kubectl -n agent-sandbox get sandboxwarmpool,sandboxes,pods
+
+# 4. Verify Prometheus, Grafana, and Ingress Controller
+kubectl -n monitoring get pods
+kubectl -n ingress-nginx get pods
 ```
 
-*Expected output:* You should see `sandboxwarmpool.extensions.agents.x-k8s.io/default` with `READY 1, DESIRED 1`, and a standby pod running under `gvisor`.
+---
+
+## 🌐 Ingress & Observability Access
+
+### Accessing Prometheus & Grafana via Ingress
+Both Prometheus and Grafana are routed via the NGINX Ingress controller:
+
+* **Grafana Dashboard:**
+  * Host URL: `http://grafana.127.0.0.1.nip.io` (or `http://grafana.local`)
+  * Username: `admin` | Password: `admin`
+  * Pre-loaded Dashboard: **Kubernetes Agent Sandbox (mogenius) Observability**
+* **Prometheus Targets & Query UI:**
+  * Host URL: `http://prometheus.127.0.0.1.nip.io` (or `http://prometheus.local`)
+
+*(Note: On macOS Docker driver, you can access Ingress via `minikube tunnel` or by port-forwarding the Ingress controller: `kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 8080:80`)*
+
+---
+
+## 🔀 Demo Step 0: Sandbox Ingress & Dynamic Routing POC
+
+In AWS, API Gateway routes traffic to Lambda MicroVMs using custom headers (`X-aws-proxy-port` or `X-Tenant`). In Kubernetes, `sandbox-router` and Ingress handle dynamic routing to isolated gVisor pods without exposing container ports:
+
+```bash
+# Run the automated Ingress & Routing POC script:
+./k8s-agent-sandbox/ingress/test_ingress_poc.sh
+```
+
+Or manually:
+```bash
+# 1. Claim a Sandbox from the warm pool
+kubectl -n agent-sandbox apply -f - <<EOF
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata: { name: demo-ingress-claim }
+spec:
+  warmPoolRef: { name: default }
+  lifecycle: { shutdownPolicy: Delete }
+EOF
+
+# 2. Get the assigned Sandbox ID
+kubectl wait --for=condition=Ready sandboxclaim/demo-ingress-claim -n agent-sandbox --timeout=15s
+SANDBOX_ID=$(kubectl -n agent-sandbox get sandboxclaim demo-ingress-claim -o jsonpath='{.status.sandbox.name}')
+
+# 3. Route HTTP traffic through sandbox-router to the sandbox
+kubectl run test-curl --image=curlimages/curl --restart=Never --rm -i --command -- \
+  curl -s -i -H "X-Sandbox-ID: ${SANDBOX_ID}" \
+             -H "X-Sandbox-Namespace: agent-sandbox" \
+             -H "X-Sandbox-Port: 8080" \
+             http://sandbox-router.agent-sandbox-system.svc.cluster.local:8080/healthz
+
+# 4. Clean up
+kubectl -n agent-sandbox delete sandboxclaim demo-ingress-claim
+```
 
 ---
 
