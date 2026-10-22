@@ -160,7 +160,7 @@ echo "CI Runner Sandbox: $CI_POD"
 ### 2.2 Copy Repository & Run Test Pipeline
 ```bash
 # Copy the ci-demo folder into the isolated sandbox workspace
-kubectl -n agent-sandbox cp ./ci-demo $CI_POD:/home/coder/project/ci-demo
+kubectl -n agent-sandbox cp ./aws-lambda-microvms/ci-demo $CI_POD:/home/coder/project/ci-demo
 
 # Execute the test pipeline inside the sandboxed environment
 kubectl -n agent-sandbox exec $CI_POD -- bash -c "cd /home/coder/project/ci-demo && python3 -m unittest discover tests"
