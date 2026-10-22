@@ -31,3 +31,10 @@ Here are the architecture diagrams provided during our AWS Lambda MicroVMs works
 ![IAM Hydration](images/6_iam_hydration.png)
 **Description for Article:** 
 > *The STS Assume Role interaction flow. The MicroVM takes the injected `X-Tenant` identifier, hydrates a JSON policy template, and fetches restricted, temporary AWS credentials to lock down the application's blast radius.*
+
+---
+
+### 7. Part 2 Follow-Up Article Cover: AWS Lambda MicroVMs vs. Kubernetes Agent Sandbox & gVisor
+![AWS Lambda MicroVMs vs. Kubernetes Agent Sandbox & gVisor](images/k8s_vs_aws_microvms_banner.jpg)
+**Description for Follow-Up Article:**
+> *Cover banner for the Part 2 comparative engineering benchmark ([`FOLLOW_UP_ARTICLE_K8S_VS_MICROVMS.md`](FOLLOW_UP_ARTICLE_K8S_VS_MICROVMS.md)), contrasting AWS Lambda MicroVMs (Firecracker) against Kubernetes Agent Sandbox (`mogenius` + Google `gVisor`).*
