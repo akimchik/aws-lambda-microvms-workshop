@@ -2,7 +2,7 @@
 
 ### A hands-on architectural benchmark, a critical security post-mortem on our own STS "Token Vending Machine," and why Kubernetes (`kubernetes-sigs/agent-sandbox` + `mogenius`) won our enterprise evaluation.
 
-![Secure AI Agent Code Execution Platform: AWS Lambda MicroVMs vs. Kubernetes Agent Sandbox & gVisor](images/k8s_vs_aws_microvms_banner.jpg)
+![Secure AI Agent Code Execution Platform: AWS Lambda MicroVMs vs. Kubernetes Agent Sandbox & gVisor](images/k8s_vs_aws_microvms_banner_v1.jpg)
 
 In [my previous article](https://www.linkedin.com/pulse/ai-agenten-schrijven-code-maar-zijn-onze-platforms-klaar-iakym-lynnyk-bbmye/) (*"AI agents are writing code. But are our platforms ready to execute it securely?"*), I made a bold claim: **logical isolation in Kubernetes is dead for autonomous AI workloads.**
 
