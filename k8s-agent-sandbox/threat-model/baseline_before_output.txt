@@ -1,0 +1,69 @@
+Target Sandbox Pod: default-8qsbc
+================================================================================
+AI SANDBOX THREAT MODEL RED-TEAM PROBE
+Host / Pod Context: default-8qsbc
+Timestamp: 2026-10-26T12:03:15Z
+================================================================================
+
+### 🛡️ Threat Assessment Scorecard
+
+| Vector ID | Threat Surface | Target | Status | Latency | Details |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `T1_IMDS_SSRF` | **Cloud IMDS & SSRF Probe** | `http://169.254.169.254/latest/meta-data/` | 🟢 **PASS (BLOCKED)** | 2519.38ms | Connection blocked / timed out: URLError |
+| `T2_K8S_API_LATERAL` | **K8s API Lateral Movement** | `https://10.96.0.1:443/version` | 🟢 **PASS (BLOCKED)** | 2507.6ms | Access blocked: URLError |
+| `T3_INTERNAL_SVC_LATERAL` | **Internal Service Discovery** | `http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/-/healthy` | 🟢 **PASS (BLOCKED)** | 24.56ms | Service blocked: URLError |
+| `T4_AMBIENT_CREDENTIALS` | **Ambient Credential Harvesting** | `Filesystem & Environment` | 🟢 **PASS (ZERO_IN_GUEST_CREDENTIALS)** | 0.57ms | Zero service account tokens, zero cloud keys, zero ambient secrets found in container |
+| `T5_RAW_DNS_EXFILTRATION` | **Direct UDP/53 DNS Tunneling** | `8.8.8.8:53` | 🔴 **FAIL (EXPOSED)** | 19.89ms | VULNERABLE: Direct UDP socket reached public DNS server 8.8.8.8 (102 bytes received) |
+| `T6A_DIRECT_C2_EGRESS` | **Direct Arbitrary C2 Egress** | `http://example.com` | 🔴 **FAIL (EXPOSED)** | 56.32ms | VULNERABLE: Unrestricted outbound connection to arbitrary external host HTTP 200 |
+
+--- JSON OUTPUT ---
+[
+  {
+    "id": "T1_IMDS_SSRF",
+    "name": "Cloud IMDS & SSRF Probe",
+    "target": "http://169.254.169.254/latest/meta-data/",
+    "status": "PASS (BLOCKED)",
+    "latency_ms": 2519.38,
+    "detail": "Connection blocked / timed out: URLError"
+  },
+  {
+    "id": "T2_K8S_API_LATERAL",
+    "name": "K8s API Lateral Movement",
+    "target": "https://10.96.0.1:443/version",
+    "status": "PASS (BLOCKED)",
+    "latency_ms": 2507.6,
+    "detail": "Access blocked: URLError"
+  },
+  {
+    "id": "T3_INTERNAL_SVC_LATERAL",
+    "name": "Internal Service Discovery",
+    "target": "http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/-/healthy",
+    "status": "PASS (BLOCKED)",
+    "latency_ms": 24.56,
+    "detail": "Service blocked: URLError"
+  },
+  {
+    "id": "T4_AMBIENT_CREDENTIALS",
+    "name": "Ambient Credential Harvesting",
+    "target": "Filesystem & Environment",
+    "status": "PASS (ZERO_IN_GUEST_CREDENTIALS)",
+    "latency_ms": 0.57,
+    "detail": "Zero service account tokens, zero cloud keys, zero ambient secrets found in container"
+  },
+  {
+    "id": "T5_RAW_DNS_EXFILTRATION",
+    "name": "Direct UDP/53 DNS Tunneling",
+    "target": "8.8.8.8:53",
+    "status": "FAIL (EXPOSED)",
+    "latency_ms": 19.89,
+    "detail": "VULNERABLE: Direct UDP socket reached public DNS server 8.8.8.8 (102 bytes received)"
+  },
+  {
+    "id": "T6A_DIRECT_C2_EGRESS",
+    "name": "Direct Arbitrary C2 Egress",
+    "target": "http://example.com",
+    "status": "FAIL (EXPOSED)",
+    "latency_ms": 56.32,
+    "detail": "VULNERABLE: Unrestricted outbound connection to arbitrary external host HTTP 200"
+  }
+]
