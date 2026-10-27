@@ -124,7 +124,7 @@ if ! kubectl get ns ingress-nginx >/dev/null 2>&1; then
     echo "Enabling Minikube ingress addon..."
     minikube addons enable ingress
 fi
-kubectl -n ingress-nginx wait --for=condition=Ready pod -l app.kubernetes.io/component=controller --timeout=120s
+kubectl -n ingress-nginx wait --for=condition=Ready pod -l app.kubernetes.io/component=controller --timeout=180s
 echo -e "${GREEN}✓ NGINX Ingress Controller is Ready.${NC}"
 
 # ------------------------------------------------------------------------------
@@ -181,7 +181,7 @@ echo -e "${GREEN}✓ Sandbox Router, Ingress, ServiceMonitor, and Latency/Securi
 # ------------------------------------------------------------------------------
 echo -e "\n${YELLOW}[7/8] Reconciling Out-of-Sandbox Egress & Credential Broker...${NC}"
 kubectl apply -f "${K8S_DIR}/threat-model/egress-broker.yaml" >/dev/null
-kubectl -n sandbox-egress-system rollout status deployment/egress-broker --timeout=60s >/dev/null
+kubectl -n sandbox-egress-system rollout status deployment/egress-broker --timeout=180s
 echo -e "${GREEN}✓ Egress & Credential Broker and cross-namespace NetworkPolicies reconciled.${NC}"
 
 # ------------------------------------------------------------------------------
@@ -233,7 +233,7 @@ if ! kubectl -n testkube rollout status deployment/testkube-mongodb --timeout=18
     kubectl -n testkube rollout restart deployment/testkube-mongodb
     kubectl -n testkube rollout status deployment/testkube-mongodb --timeout=180s
 fi
-kubectl -n testkube rollout status deployment/testkube-api-server --timeout=60s >/dev/null
+kubectl -n testkube rollout status deployment/testkube-api-server --timeout=180s
 echo -e "${GREEN}✓ Testkube MongoDB and API Server are Ready on 'minikube-m02'.${NC}"
 
 # ------------------------------------------------------------------------------
