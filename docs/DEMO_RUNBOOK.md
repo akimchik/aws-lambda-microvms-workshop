@@ -4,25 +4,46 @@ This runbook contains step-by-step instructions to run a live demo comparing **A
 
 ---
 
-## 📋 Prerequisites & Health Check
+## 📋 Zero-to-Hero Provisioning & Self-Healing Bootstrapper
 
-Ensure your local cluster, gVisor runtime, Ingress, and Observability stack are ready:
+Whether starting from a completely wiped environment (`minikube delete`) or waking the cluster after a laptop reboot or partial component drift, run my 8-stage idempotent reconciler:
 
 ```bash
-# 1. Verify Minikube is running
-minikube status
-
-# 2. Verify gVisor runtime class exists
-kubectl get runtimeclass gvisor
-
-# 3. Verify mogenius-agent-sandbox controller, warm pool, and router
-kubectl -n agent-sandbox-system get pods
-kubectl -n agent-sandbox get sandboxwarmpool,sandboxes,pods
-
-# 4. Verify Prometheus, Grafana, and Ingress Controller
-kubectl -n monitoring get pods
-kubectl -n ingress-nginx get pods
+# Reconcile all 8 architecture layers (or pass --upgrade-helm to force Helm chart upgrades)
+./k8s-agent-sandbox/scripts/bootstrap_cluster.sh
 ```
+
+What `bootstrap_cluster.sh` automatically checks and converges against the codebase:
+1. **Multi-Node Topology (`minikube` + `minikube-m02`):** Starts the control-plane node, adds the dedicated worker node `minikube-m02` if missing, and applies the `dedicated=testkube:NoSchedule` taint and labels.
+2. **Host Resolution & Addon Cleanup:** Maps `control-plane.minikube.internal` in `/etc/hosts` and disables the legacy `gvisor` addon.
+3. **Native gVisor (`runsc`) Runtime:** Installs the official Google `runsc` binary inside the node if missing, deduplicates `/etc/containerd/config.toml`, restarts `containerd`, and registers `RuntimeClass: gvisor`.
+4. **NGINX Ingress Controller:** Enables and waits for `ingress-nginx-controller` readiness.
+5. **Observability Stack (`monitoring`):** Deploys `kube-prometheus-stack` via Helm and reconciles `monitoring-ingress.yaml` plus all 3 Grafana dashboards.
+6. **Agent Sandbox & Dynamic Router (`agent-sandbox-system` / `agent-sandbox`):** Deploys `mogenius-agent-sandbox` (`v1.2.1`), `sandbox-router`, `sandbox-ingress`, `ServiceMonitor`, and `sandbox-latency-exporter`.
+7. **Out-of-Sandbox Egress & Credential Broker (`sandbox-egress-system`):** Reconciles `egress-broker.yaml` and cross-namespace zero-trust `NetworkPolicy` rules.
+8. **Testkube OSS & Automated Workflows (`testkube` on `minikube-m02`):** Deploys Testkube OSS (`v2.14.2`) pinned strictly to `minikube-m02`, applies RBAC (`rbac.yaml`), and registers both `agent-sandbox-benchmark` and `agent-sandbox-security-audit`.
+
+---
+
+## 🧪 Automated 60 QPS Load & Red-Team Security Workflows (Testkube OSS)
+
+All load generation and security fuzzing workloads execute exclusively on the isolated worker node `minikube-m02` so they never contend with the gVisor sandboxes on `minikube`:
+
+```bash
+# 1. Run the 60 QPS Ingress Performance & Warm Pool Claim Latency Benchmark
+testkube run tw agent-sandbox-benchmark -f
+
+# 2. Run the Continuous Red-Team Security Audit (In-Guest T1-T6 Probe + k6 Egress Broker Fuzzing)
+testkube run tw agent-sandbox-security-audit -f
+
+# 3. Inspect past executions
+testkube get twe
+```
+
+* **Dedicated Testkube & Security Grafana Dashboard:**
+  * `http://grafana.127.0.0.1.nip.io/d/testkube-agent-benchmarks/testkube-agent-sandbox-benchmark-dashboard`
+* **Sandbox HTTP Responses & Latency Comparison Dashboard:**
+  * `http://grafana.127.0.0.1.nip.io/d/sandbox-http-responses/sandbox-ingress-and-http-responses-comparison-dashboard`
 
 ---
 
