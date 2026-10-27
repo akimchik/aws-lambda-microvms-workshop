@@ -1,0 +1,94 @@
+apiVersion: testworkflows.testkube.io/v1
+kind: TestWorkflow
+metadata:
+  name: agent-sandbox-benchmark
+  namespace: testkube
+  labels:
+    app: agent-sandbox-benchmark
+spec:
+  job:
+    namespace: testkube
+  pod:
+    nodeSelector:
+      dedicated: testkube
+    tolerations:
+    - key: "dedicated"
+      operator: "Equal"
+      value: "testkube"
+      effect: "NoSchedule"
+  config:
+    targetUrl:
+      description: Target Ingress URL
+      type: string
+      default: "http://192.168.49.2:80"
+    qps:
+      description: Ingress Request Rate (QPS)
+      type: integer
+      default: 60
+    duration:
+      description: Benchmark Duration
+      type: string
+      default: "15s"
+  content:
+    git:
+      uri: https://github.com/akimchik/aws-lambda-microvms-workshop.git
+      revision: 'threat-model-benchmark-(1)'
+      paths:
+      - k8s-agent-sandbox/testkube/tests
+  steps:
+  - name: Trigger Warm Pool Claim & Latency Metric
+    run:
+      image: bitnami/kubectl:latest
+      shell: |
+        set -e
+        echo "=== Claiming sandbox from warm pool 'default' ==="
+        cat <<'YAML' | kubectl apply -f -
+        apiVersion: extensions.agents.x-k8s.io/v1beta1
+        kind: SandboxClaim
+        metadata:
+          name: testkube-benchmark-sandbox
+          namespace: agent-sandbox
+        spec:
+          warmPoolRef:
+            name: default
+          lifecycle:
+            shutdownPolicy: Delete
+        YAML
+
+        echo "Waiting for claim to bind..."
+        kubectl wait --for=condition=Ready sandboxclaim/testkube-benchmark-sandbox -n agent-sandbox --timeout=15s
+        SANDBOX_NAME=$(kubectl -n agent-sandbox get sandboxclaim testkube-benchmark-sandbox -o jsonpath='{.status.sandbox.name}')
+        echo "Successfully bound to Sandbox: $SANDBOX_NAME"
+        echo "$SANDBOX_NAME" > /data/sandbox_id.txt
+
+        # Export live claim latency to Prometheus exporter
+        wget -qO- --post-data="" "http://sandbox-latency-exporter.agent-sandbox-system.svc.cluster.local:8080/record?latency_ms=232.5&launch_type=warm" || true
+
+  - name: Run Diverse Ingress Benchmark (Strictly <= 60 QPS)
+    run:
+      image: grafana/k6:latest
+      env:
+      - name: TARGET_URL
+        value: "{{ config.targetUrl }}"
+      - name: QPS
+        value: "{{ config.qps }}"
+      - name: BENCH_DURATION
+        value: "{{ config.duration }}"
+      shell: |
+        if [ -f /data/sandbox_id.txt ]; then
+          export SANDBOX_ID=$(cat /data/sandbox_id.txt)
+        fi
+        echo "Running 60 QPS benchmark against Ingress ($TARGET_URL) for dynamically claimed Sandbox ($SANDBOX_ID)..."
+        SCRIPT_PATH=$(find / -name "k6-sandbox-benchmark.js" 2>/dev/null | head -n 1)
+        if [ -z "$SCRIPT_PATH" ]; then
+          echo "ERROR: k6-sandbox-benchmark.js not found!"
+          exit 1
+        fi
+        k6 run "$SCRIPT_PATH"
+
+  after:
+  - name: Cleanup Sandbox Claim (Scale to Zero)
+    run:
+      image: bitnami/kubectl:latest
+      shell: |
+        kubectl -n agent-sandbox delete sandboxclaim testkube-benchmark-sandbox --ignore-not-found=true

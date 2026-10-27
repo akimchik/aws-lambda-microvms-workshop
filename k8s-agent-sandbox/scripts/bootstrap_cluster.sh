@@ -74,11 +74,25 @@ handler: runsc
 EOF
 echo -e "${GREEN}✓ RuntimeClass 'gvisor' registered.${NC}"
 
-# 6. Wait for node and pods to be ready
-echo -e "\n${YELLOW}[6/6] Waiting for cluster components to stabilize...${NC}"
+# 6. Verify worker node (minikube-m02) and configure taints
+echo -e "\n${YELLOW}[6/7] Verifying multi-node configuration & testkube taints...${NC}"
+if kubectl get node minikube-m02 >/dev/null 2>&1; then
+    kubectl label node minikube-m02 dedicated=testkube node-role.kubernetes.io/worker=testkube --overwrite >/dev/null 2>&1 || true
+    kubectl taint node minikube-m02 dedicated=testkube:NoSchedule --overwrite >/dev/null 2>&1 || true
+    echo -e "${GREEN}✓ Worker node minikube-m02 verified and tainted for dedicated test workloads.${NC}"
+else
+    echo -e "${YELLOW}! Worker node minikube-m02 not detected. Run 'minikube node add --worker=true' to add it.${NC}"
+fi
+
+# 7. Wait for node and pods to be ready
+echo -e "\n${YELLOW}[7/7] Waiting for cluster components to stabilize...${NC}"
 kubectl wait --for=condition=Ready node/minikube --timeout=60s
+if kubectl get node minikube-m02 >/dev/null 2>&1; then
+    kubectl wait --for=condition=Ready node/minikube-m02 --timeout=60s || true
+fi
 
 echo -e "\n${GREEN}============================================================${NC}"
 echo -e "${GREEN}Cluster is 100% HEALTHY & READY!${NC}"
 echo -e "${GREEN}============================================================${NC}"
+kubectl get nodes -o wide
 kubectl get pods -A
