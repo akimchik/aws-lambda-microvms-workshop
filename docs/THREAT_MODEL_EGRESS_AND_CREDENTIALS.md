@@ -248,7 +248,19 @@ Here is how four major execution models compare when evaluated against this comp
 
 ---
 
-## 8. Five Golden Rules for Platform Engineers Building AI Sandboxes
+## 8. Continuous Red-Teaming & 60 QPS Load Benchmarking with Testkube OSS
+
+Running `threat_probe.py` manually once is useful for an initial audit, but in production Kubernetes clusters, CNI policies, RBAC bindings, and egress rules silently drift. To turn this threat model into a continuous compliance gate, I deployed **Testkube OSS** on a dedicated second worker node (`minikube-m02`, tainted with `dedicated=testkube:NoSchedule`) so my load generators and security runners never steal CPU or memory from the gVisor sandboxes under test.
+
+Every time I trigger `testkube run tw agent-sandbox-security-audit -f` (for continuous red-teaming) or `testkube run tw agent-sandbox-benchmark -f` (for 60 QPS stress testing), Testkube pulls my test suite directly from GitHub and executes a multi-stage verification pipeline:
+1. **Warm Pool Claim & Telemetry:** Claims a fresh gVisor sandbox (`SandboxClaim`), measures real-time binding latency in milliseconds, and exports `agent_sandbox_claim_controller_startup_latency_ms` to Prometheus.
+2. **In-Guest Red-Team Security Audit (`agent-sandbox-security-audit`):** Pipes `threat_probe.py` directly inside the untrusted gVisor pod against the live `egress-broker` and asserts that `T1_IMDS_SSRF`, `T2_K8S_API_LATERAL`, `T3_INTERNAL_SVC_LATERAL`, `T4_AMBIENT_CREDENTIALS`, `T6B_BROKER_POLICY_ENFORCEMENT`, and `T6C_OUT_OF_SANDBOX_AUTH` all return `PASS`, followed by a `k6` security fuzzing pass (`k6-security-audit.js`) verifying 100% SSRF/C2 blocking (`HTTP 403`), zero raw credential leakage, and strict cross-tenant `X-Sandbox-ID` isolation.
+3. **60 QPS Ingress Stress Benchmark (`agent-sandbox-benchmark`):** Runs `grafana/k6` at a strict **60 QPS** rate limit across `/manifest.json` (55%), `/healthz` (30%), and deliberate `/nonexistent-probe` 404s (15%), asserting `100%` check success and `p(95) < 150ms`.
+4. **Scale-to-Zero Teardown:** Deletes the `SandboxClaim` and returns the cluster to baseline.
+
+---
+
+## 9. Five Golden Rules for Platform Engineers Building AI Sandboxes
 
 Building a truly secure sandbox for autonomous agents requires looking far beyond hypervisors and container runtimes. Here are the five principles I now enforce across all my agent infrastructure:
 
@@ -256,7 +268,7 @@ Building a truly secure sandbox for autonomous agents requires looking far beyon
 2. **Never mount credentials inside the untrusted guest.** Ephemeral 15-minute tokens do not protect you against automated exploits that complete in 200ms. Keep all tokens in an out-of-sandbox proxy that injects `Authorization` headers on-the-wire.
 3. **Enforce Layer 7 FQDN egress whitelists.** Default-deny outbound internet access. Untrusted agents should only be able to reach explicit, pre-approved package registries (e.g., `pypi.org`, `npmjs.org`) and version control endpoints (`api.github.com`).
 4. **Close the raw DNS exfiltration backdoor.** Never configure untrusted sandboxes with raw public nameservers (`8.8.8.8`). Route all DNS through internal resolvers that drop arbitrary external domain queries, or block UDP/53 outbound entirely.
-5. **Red-team your sandbox before claiming security.** A YAML configuration is not a guarantee of security. Run automated probes against your live clusters to verify that your CNI, network policies, and egress proxies actually drop malicious traffic.
+5. **Red-team your sandbox continuously.** A YAML configuration is not a guarantee of security. Run automated Testkube probes against your live clusters to verify that your CNI, network policies, and egress proxies actually drop malicious traffic.
 
 ---
 
@@ -266,5 +278,9 @@ All code, manifests, and raw outputs from this benchmark are open-source and ava
 
 - **Red-Team Threat Probe:** [`k8s-agent-sandbox/threat-model/threat_probe.py`](../k8s-agent-sandbox/threat-model/threat_probe.py)
 - **Egress & Credential Broker:** [`k8s-agent-sandbox/threat-model/egress-broker.yaml`](../k8s-agent-sandbox/threat-model/egress-broker.yaml)
+- **Testkube Security Audit Workflow:** [`k8s-agent-sandbox/testkube/test-workflow-security.yaml`](../k8s-agent-sandbox/testkube/test-workflow-security.yaml)
+- **Testkube 60 QPS Performance Workflow:** [`k8s-agent-sandbox/testkube/test-workflow.yaml`](../k8s-agent-sandbox/testkube/test-workflow.yaml)
+- **k6 Security Fuzzing Suite:** [`k8s-agent-sandbox/testkube/tests/k6-security-audit.js`](../k8s-agent-sandbox/testkube/tests/k6-security-audit.js)
+- **Dedicated Testkube Grafana Dashboard:** [`k8s-agent-sandbox/monitoring/grafana-dashboard-testkube.yaml`](../k8s-agent-sandbox/monitoring/grafana-dashboard-testkube.yaml)
 - **Baseline Probe Output:** [`k8s-agent-sandbox/threat-model/baseline_before_output.txt`](../k8s-agent-sandbox/threat-model/baseline_before_output.txt)
 - **Hardened Probe Output:** [`k8s-agent-sandbox/threat-model/hardened_after_output.txt`](../k8s-agent-sandbox/threat-model/hardened_after_output.txt)

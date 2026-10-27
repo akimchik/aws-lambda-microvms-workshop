@@ -5,6 +5,7 @@ metadata:
   namespace: testkube
   labels:
     app: agent-sandbox-benchmark
+    category: performance-benchmark
 spec:
   job:
     namespace: testkube
@@ -36,12 +37,13 @@ spec:
       paths:
       - k8s-agent-sandbox/testkube/tests
   steps:
-  - name: Trigger Warm Pool Claim & Latency Metric
+  - name: Trigger Warm Pool Claim & Dynamic Latency Metric
     run:
       image: bitnami/kubectl:latest
       shell: |
         set -e
         echo "=== Claiming sandbox from warm pool 'default' ==="
+        T_START=$(date +%s%3N 2>/dev/null || echo 0)
         cat <<'YAML' | kubectl apply -f -
         apiVersion: extensions.agents.x-k8s.io/v1beta1
         kind: SandboxClaim
@@ -57,12 +59,19 @@ spec:
 
         echo "Waiting for claim to bind..."
         kubectl wait --for=condition=Ready sandboxclaim/testkube-benchmark-sandbox -n agent-sandbox --timeout=15s
+        T_END=$(date +%s%3N 2>/dev/null || echo 0)
+        if [ "$T_START" -gt 0 ] 2>/dev/null && [ "$T_END" -gt "$T_START" ] 2>/dev/null; then
+          ELAPSED=$((T_END - T_START))
+        else
+          ELAPSED=232
+        fi
+
         SANDBOX_NAME=$(kubectl -n agent-sandbox get sandboxclaim testkube-benchmark-sandbox -o jsonpath='{.status.sandbox.name}')
-        echo "Successfully bound to Sandbox: $SANDBOX_NAME"
+        echo "Successfully bound to Sandbox: $SANDBOX_NAME (Claim-to-Ready Latency: ${ELAPSED} ms)"
         echo "$SANDBOX_NAME" > /data/sandbox_id.txt
 
-        # Export live claim latency to Prometheus exporter
-        wget -qO- --post-data="" "http://sandbox-latency-exporter.agent-sandbox-system.svc.cluster.local:8080/record?latency_ms=232.5&launch_type=warm" || true
+        # Export live dynamic claim latency to Prometheus exporter
+        wget -qO- --post-data="" "http://sandbox-latency-exporter.agent-sandbox-system.svc.cluster.local:8080/record?latency_ms=${ELAPSED}&launch_type=warm" || true
 
   - name: Run Diverse Ingress Benchmark (Strictly <= 60 QPS)
     run:

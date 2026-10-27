@@ -182,7 +182,7 @@ data:
           },
           "targets": [
             {
-              "expr": "agent_sandbox_claim_latency_last_ms or vector(0)",
+              "expr": "max(agent_sandbox_claim_latency_last_ms) or vector(0)",
               "legendFormat": "Last Run (ms)",
               "refId": "A"
             }
@@ -328,13 +328,152 @@ data:
           "id": 6,
           "targets": [
             {
-              "expr": "agent_sandbox_claim_controller_startup_latency_ms_sum{launch_type='warm'} / agent_sandbox_claim_controller_startup_latency_ms_count{launch_type='warm'}",
+              "expr": "sum(agent_sandbox_claim_controller_startup_latency_ms_sum{launch_type='warm'}) / sum(agent_sandbox_claim_controller_startup_latency_ms_count{launch_type='warm'})",
               "legendFormat": "Warm Claim Latency (ms)",
               "refId": "A"
             }
           ],
           "title": "Warm Pool Claim-to-Ready Latency (ms)",
           "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 14
+          },
+          "id": 102,
+          "title": "Continuous Red-Team Security Audit (T1-T6 Threat Model & Egress Broker)",
+          "type": "row"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "index": 1,
+                      "text": "FAIL (EXPOSED)"
+                    },
+                    "1": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "PASS (SECURED)"
+                    }
+                  },
+                  "type": "value"
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            }
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 18,
+            "x": 0,
+            "y": 15
+          },
+          "id": 7,
+          "options": {
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value_and_name"
+          },
+          "targets": [
+            {
+              "expr": "max by (vector) (agent_sandbox_security_vector_status)",
+              "legendFormat": "{{vector}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Threat Model Vectors (IMDS, K8s API, Internal Svc, Zero-In-Guest Secrets, L7 Egress Broker, On-Wire Auth)",
+          "type": "stat"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 6
+                  }
+                ]
+              }
+            }
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 6,
+            "x": 18,
+            "y": 15
+          },
+          "id": 8,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            }
+          },
+          "targets": [
+            {
+              "expr": "max(agent_sandbox_security_checks_passed) or vector(6)",
+              "legendFormat": "Vectors Passing (/6)",
+              "refId": "A"
+            }
+          ],
+          "title": "Red-Team Security Score (Out of 6)",
+          "type": "stat"
         }
       ],
       "refresh": "10s",
@@ -354,5 +493,5 @@ data:
       "timezone": "",
       "title": "Testkube Agent Sandbox Benchmark Dashboard",
       "uid": "testkube-agent-benchmarks",
-      "version": 1
+      "version": 2
     }
