@@ -52,9 +52,11 @@ This repository contains the end-to-end reference architectures, deployment mani
 │   │   ├── rbac.yaml                    # ClusterRole & bindings for automated SandboxClaim lifecycle testing
 │   │   ├── test-workflow.yaml           # Git-sourced 60 QPS Ingress benchmark & warm-pool latency workflow
 │   │   ├── test-workflow-security.yaml  # Continuous red-team security audit & k6 broker fuzzing workflow
+│   │   ├── test-workflow-sustained-load.yaml # 70 RPS / 10K requests sustained load workflow (no pod restarts)
 │   │   └── tests/
 │   │       ├── k6-sandbox-benchmark.js  # 60 QPS rate-limited Ingress benchmark script
 │   │       ├── k6-security-audit.js     # k6 SSRF, C2 egress, credential leak & tenant isolation fuzzer
+│   │       ├── k6-sustained-load.js     # 70 RPS / 10K+ sustained traffic generator script
 │   │       └── claim_and_measure.py     # Warm pool claim-to-ready latency measurement hook
 │   └── monitoring/
 │       ├── values-prometheus-grafana.yaml                     # kube-prometheus-stack Helm values
@@ -96,9 +98,10 @@ This repository contains the end-to-end reference architectures, deployment mani
 ### Option A: Run the Kubernetes Agent Sandbox Stack (Minikube / Any K8s Cluster)
 Follow the step-by-step instructions in [`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md) to:
 1. **Provision or Self-Heal the Full 2-Node Cluster:** Run `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` (works from a fresh `minikube delete` or after a laptop sleep/reboot, reconciling all 8 layers including `minikube-m02`, `gVisor`, Prometheus/Grafana, `egress-broker`, and Testkube OSS).
-2. **Run Continuous Red-Team Security & 60 QPS Load Workflows via Testkube:**
+2. **Run Continuous Red-Team Security & Benchmark Workflows via Testkube:**
    - `testkube run tw agent-sandbox-security-audit -f` *(In-guest `T1`–`T6` threat probe + k6 Egress Broker & tenant isolation fuzzing)*
-   - `testkube run tw agent-sandbox-benchmark -f` *(Warm pool claim latency + 60 QPS rate-limited Ingress benchmark)*
+   - `testkube run tw agent-sandbox-benchmark -f` *(Warm pool claim latency + 60 QPS rate-limited Ingress benchmark with scale-to-zero)*
+   - `testkube run tw agent-sandbox-sustained-load -f` *(70 RPS sustained load for 10K+ requests targeting active sandbox without pod restarts)*
 3. **Execute Interactive Demo Modules 1–4:** (`SandboxWarmPool`, Ephemeral CI/CD, Multi-Tenant PVC Isolation, `operatingMode: Suspended`, and `kubectl debug`).
 4. **Inspect Live Telemetry & Security Posture in Grafana:** (`http://grafana.127.0.0.1.nip.io`, login `admin` / `admin`).
 

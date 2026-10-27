@@ -30,13 +30,16 @@ What `bootstrap_cluster.sh` automatically checks and converges against the codeb
 All load generation and security fuzzing workloads execute exclusively on the isolated worker node `minikube-m02` so they never contend with the gVisor sandboxes on `minikube`:
 
 ```bash
-# 1. Run the 60 QPS Ingress Performance & Warm Pool Claim Latency Benchmark
+# 1. Run the 60 QPS Ingress Performance & Warm Pool Claim Latency Benchmark (with scale-to-zero)
 testkube run tw agent-sandbox-benchmark -f
 
 # 2. Run the Continuous Red-Team Security Audit (In-Guest T1-T6 Probe + k6 Egress Broker Fuzzing)
 testkube run tw agent-sandbox-security-audit -f
 
-# 3. Inspect past executions
+# 3. Run the High-Throughput Sustained Load Benchmark (70 RPS / 10,500 requests targeting active sandbox without restarts)
+testkube run tw agent-sandbox-sustained-load -f
+
+# 4. Inspect past executions
 testkube get twe
 ```
 

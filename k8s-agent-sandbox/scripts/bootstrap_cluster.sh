@@ -209,24 +209,35 @@ else
     echo -e "${GREEN}✓ Helm release 'testkube' and core deployments verified on 'minikube-m02'.${NC}"
 fi
 
-kubectl apply -f "${K8S_DIR}/testkube/rbac.yaml" \
-              -f "${K8S_DIR}/testkube/test-workflow.yaml" \
-              -f "${K8S_DIR}/testkube/test-workflow-security.yaml" >/dev/null
-echo -e "${GREEN}✓ Testkube RBAC, 'agent-sandbox-benchmark', and 'agent-sandbox-security-audit' workflows reconciled.${NC}"
+kubectl apply -f "${K8S_DIR}/testkube/rbac.yaml" >/dev/null
+
+# Dynamically discover and reconcile all TestWorkflows and verify tests count
+WORKFLOW_FILES=($(find "${K8S_DIR}/testkube" -maxdepth 1 -name "test-workflow*.yaml" | sort))
+WORKFLOW_COUNT=${#WORKFLOW_FILES[@]}
+TEST_SCRIPTS=($(find "${K8S_DIR}/testkube/tests" -maxdepth 1 -type f | sort))
+TEST_SCRIPT_COUNT=${#TEST_SCRIPTS[@]}
+
+for wf in "${WORKFLOW_FILES[@]}"; do
+    kubectl apply -f "$wf" >/dev/null
+done
+
+REGISTERED_WF_COUNT=$(kubectl -n testkube get testworkflows --no-headers 2>/dev/null | wc -l | tr -d ' ')
+echo -e "${GREEN}✓ Testkube RBAC reconciled; verified ${REGISTERED_WF_COUNT}/${WORKFLOW_COUNT} TestWorkflows active in cluster (${TEST_SCRIPT_COUNT} benchmark/probe scripts in 'tests/').${NC}"
 
 # Auto-heal potential CrashLoopBackOff race conditions between MongoDB and API server on node wake-up
+# Only restart if an explicit CrashLoopBackOff or Error is detected; otherwise give normal initialization 90s grace
 echo "Verifying Testkube service readiness on 'minikube-m02'..."
-if ! kubectl -n testkube rollout status deployment/testkube-mongodb --timeout=20s >/dev/null 2>&1; then
-    echo "Resetting MongoDB backoff and rolling restart..."
+if kubectl -n testkube get pods -l app.kubernetes.io/name=mongodb 2>/dev/null | grep -E 'CrashLoopBackOff|Error' >/dev/null; then
+    echo "Detected CrashLoopBackOff on MongoDB. Resetting rollout..."
     kubectl -n testkube rollout restart deployment/testkube-mongodb >/dev/null
-    kubectl -n testkube rollout status deployment/testkube-mongodb --timeout=60s >/dev/null
 fi
+kubectl -n testkube rollout status deployment/testkube-mongodb --timeout=90s >/dev/null
 
-if ! kubectl -n testkube rollout status deployment/testkube-api-server --timeout=20s >/dev/null 2>&1; then
-    echo "Resetting Testkube API Server backoff and rolling restart..."
+if kubectl -n testkube get pods -l app.kubernetes.io/name=testkube-api-server 2>/dev/null | grep -E 'CrashLoopBackOff|Error' >/dev/null; then
+    echo "Detected CrashLoopBackOff on Testkube API Server. Resetting rollout..."
     kubectl -n testkube rollout restart deployment/testkube-api-server >/dev/null
-    kubectl -n testkube rollout status deployment/testkube-api-server --timeout=60s >/dev/null
 fi
+kubectl -n testkube rollout status deployment/testkube-api-server --timeout=90s >/dev/null
 echo -e "${GREEN}✓ Testkube MongoDB and API Server are Ready on 'minikube-m02'.${NC}"
 
 # ------------------------------------------------------------------------------
@@ -240,5 +251,5 @@ echo -e "${GREEN}Cluster is 100% CONVERGED, HEALTHY & READY!${NC}"
 echo -e "${GREEN}============================================================${NC}"
 kubectl get nodes -o wide
 echo ""
-echo "Active TestWorkflows in 'testkube':"
+echo "Active TestWorkflows in 'testkube' (${REGISTERED_WF_COUNT}/${WORKFLOW_COUNT} ready, ${TEST_SCRIPT_COUNT} scripts in 'tests/'):"
 kubectl -n testkube get testworkflows
