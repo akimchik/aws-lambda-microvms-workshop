@@ -214,6 +214,21 @@ kubectl apply -f "${K8S_DIR}/testkube/rbac.yaml" \
               -f "${K8S_DIR}/testkube/test-workflow-security.yaml" >/dev/null
 echo -e "${GREEN}✓ Testkube RBAC, 'agent-sandbox-benchmark', and 'agent-sandbox-security-audit' workflows reconciled.${NC}"
 
+# Auto-heal potential CrashLoopBackOff race conditions between MongoDB and API server on node wake-up
+echo "Verifying Testkube service readiness on 'minikube-m02'..."
+if ! kubectl -n testkube rollout status deployment/testkube-mongodb --timeout=20s >/dev/null 2>&1; then
+    echo "Resetting MongoDB backoff and rolling restart..."
+    kubectl -n testkube rollout restart deployment/testkube-mongodb >/dev/null
+    kubectl -n testkube rollout status deployment/testkube-mongodb --timeout=60s >/dev/null
+fi
+
+if ! kubectl -n testkube rollout status deployment/testkube-api-server --timeout=20s >/dev/null 2>&1; then
+    echo "Resetting Testkube API Server backoff and rolling restart..."
+    kubectl -n testkube rollout restart deployment/testkube-api-server >/dev/null
+    kubectl -n testkube rollout status deployment/testkube-api-server --timeout=60s >/dev/null
+fi
+echo -e "${GREEN}✓ Testkube MongoDB and API Server are Ready on 'minikube-m02'.${NC}"
+
 # ------------------------------------------------------------------------------
 # Final Readiness Verification
 # ------------------------------------------------------------------------------
