@@ -224,20 +224,16 @@ done
 REGISTERED_WF_COUNT=$(kubectl -n testkube get testworkflows --no-headers 2>/dev/null | wc -l | tr -d ' ')
 echo -e "${GREEN}✓ Testkube RBAC reconciled; verified ${REGISTERED_WF_COUNT}/${WORKFLOW_COUNT} TestWorkflows active in cluster (${TEST_SCRIPT_COUNT} benchmark/probe scripts in 'tests/').${NC}"
 
-# Auto-heal potential CrashLoopBackOff race conditions between MongoDB and API server on node wake-up
-# Only restart if an explicit CrashLoopBackOff or Error is detected; otherwise give normal initialization 90s grace
+# Check MongoDB readiness for up to 3 minutes.
+# If liveness/readiness times out, perform a forced rollout restart.
 echo "Verifying Testkube service readiness on 'minikube-m02'..."
-if kubectl -n testkube get pods -l app.kubernetes.io/name=mongodb 2>/dev/null | grep -E 'CrashLoopBackOff|Error' >/dev/null; then
-    echo "Detected CrashLoopBackOff on MongoDB. Resetting rollout..."
-    kubectl -n testkube rollout restart deployment/testkube-mongodb >/dev/null
+echo "Checking MongoDB readiness (waiting up to 3m)..."
+if ! kubectl -n testkube rollout status deployment/testkube-mongodb --timeout=180s; then
+    echo -e "${YELLOW}⚠ MongoDB liveness/readiness timed out after 3m. Performing forced rollout restart...${NC}"
+    kubectl -n testkube rollout restart deployment/testkube-mongodb
+    kubectl -n testkube rollout status deployment/testkube-mongodb --timeout=180s
 fi
-kubectl -n testkube rollout status deployment/testkube-mongodb --timeout=90s >/dev/null
-
-if kubectl -n testkube get pods -l app.kubernetes.io/name=testkube-api-server 2>/dev/null | grep -E 'CrashLoopBackOff|Error' >/dev/null; then
-    echo "Detected CrashLoopBackOff on Testkube API Server. Resetting rollout..."
-    kubectl -n testkube rollout restart deployment/testkube-api-server >/dev/null
-fi
-kubectl -n testkube rollout status deployment/testkube-api-server --timeout=90s >/dev/null
+kubectl -n testkube rollout status deployment/testkube-api-server --timeout=60s >/dev/null
 echo -e "${GREEN}✓ Testkube MongoDB and API Server are Ready on 'minikube-m02'.${NC}"
 
 # ------------------------------------------------------------------------------

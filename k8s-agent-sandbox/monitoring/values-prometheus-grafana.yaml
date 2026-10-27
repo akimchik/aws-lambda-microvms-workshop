@@ -30,11 +30,34 @@ grafana:
     port: 80
   resources:
     requests:
-      cpu: 50m
-      memory: 128Mi
+      cpu: 100m
+      memory: 256Mi
     limits:
-      cpu: 750m
-      memory: 768Mi
+      cpu: "1500m"
+      memory: 1536Mi
+  readinessProbe:
+    httpGet:
+      path: /api/health
+      port: 3000
+    initialDelaySeconds: 10
+    timeoutSeconds: 5
+    periodSeconds: 10
+    failureThreshold: 5
+  livenessProbe:
+    httpGet:
+      path: /api/health
+      port: 3000
+    initialDelaySeconds: 30
+    timeoutSeconds: 5
+    periodSeconds: 15
+    failureThreshold: 10
+  grafana.ini:
+    database:
+      wal: true
+      cache_mode: shared
+    server:
+      read_timeout: 30s
+      write_timeout: 30s
 
 nodeExporter:
   enabled: true
