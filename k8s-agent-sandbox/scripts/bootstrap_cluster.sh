@@ -131,8 +131,10 @@ echo -e "${GREEN}✓ NGINX Ingress Controller is Ready.${NC}"
 # 5. Reconcile Observability Stack (Prometheus, Grafana & Dashboards)
 # ------------------------------------------------------------------------------
 echo -e "\n${YELLOW}[5/8] Reconciling Observability Stack (Prometheus & Grafana)...${NC}"
-if ! helm status monitoring -n monitoring >/dev/null 2>&1 || [ "${FORCE_HELM}" == "--upgrade-helm" ]; then
-    echo "Installing / upgrading kube-prometheus-stack in namespace 'monitoring'..."
+if ! helm status monitoring -n monitoring >/dev/null 2>&1 || \
+   ! kubectl -n monitoring get deployment monitoring-grafana >/dev/null 2>&1 || \
+   [ "${FORCE_HELM}" == "--upgrade-helm" ]; then
+    echo "Installing / recovering kube-prometheus-stack in namespace 'monitoring'..."
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
     helm repo update prometheus-community >/dev/null
     helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
@@ -140,7 +142,7 @@ if ! helm status monitoring -n monitoring >/dev/null 2>&1 || [ "${FORCE_HELM}" =
         -f "${K8S_DIR}/monitoring/values-prometheus-grafana.yaml" \
         --wait --timeout=5m
 else
-    echo -e "${GREEN}✓ Helm release 'monitoring' already deployed.${NC}"
+    echo -e "${GREEN}✓ Helm release 'monitoring' and Grafana deployment verified.${NC}"
 fi
 
 kubectl apply -f "${K8S_DIR}/monitoring/monitoring-ingress.yaml" \
@@ -153,8 +155,10 @@ echo -e "${GREEN}✓ Monitoring Ingress and all 3 Grafana Dashboards reconciled.
 # 6. Reconcile Agent Sandbox Control Plane, Warm Pool & Dynamic Router
 # ------------------------------------------------------------------------------
 echo -e "\n${YELLOW}[6/8] Reconciling mogenius Agent Sandbox, Warm Pool & Router...${NC}"
-if ! helm status agent-sandbox -n agent-sandbox-system >/dev/null 2>&1 || [ "${FORCE_HELM}" == "--upgrade-helm" ]; then
-    echo "Installing / upgrading mogenius-agent-sandbox in 'agent-sandbox-system'..."
+if ! helm status agent-sandbox -n agent-sandbox-system >/dev/null 2>&1 || \
+   ! kubectl -n agent-sandbox get sandboxwarmpool default >/dev/null 2>&1 || \
+   [ "${FORCE_HELM}" == "--upgrade-helm" ]; then
+    echo "Installing / recovering mogenius-agent-sandbox in 'agent-sandbox-system'..."
     helm repo add mogenius https://helm.mogenius.com/public >/dev/null 2>&1 || true
     helm repo update mogenius >/dev/null
     helm upgrade --install agent-sandbox mogenius/mogenius-agent-sandbox \
@@ -163,7 +167,7 @@ if ! helm status agent-sandbox -n agent-sandbox-system >/dev/null 2>&1 || [ "${F
         -f "${K8S_DIR}/helm/values-mogenius.yaml" \
         --wait --timeout=3m
 else
-    echo -e "${GREEN}✓ Helm release 'agent-sandbox' already deployed.${NC}"
+    echo -e "${GREEN}✓ Helm release 'agent-sandbox' and WarmPool 'default' verified.${NC}"
 fi
 
 kubectl apply -f "${K8S_DIR}/ingress/sandbox-router.yaml" \
@@ -181,11 +185,19 @@ kubectl -n sandbox-egress-system rollout status deployment/egress-broker --timeo
 echo -e "${GREEN}✓ Egress & Credential Broker and cross-namespace NetworkPolicies reconciled.${NC}"
 
 # ------------------------------------------------------------------------------
-# 8. Reconcile Testkube OSS on Dedicated Worker Node (minikube-m02) & Workflows
+# 8. Reconcile Testkube OSS CLI, Worker Node Stack (minikube-m02) & Workflows
 # ------------------------------------------------------------------------------
 echo -e "\n${YELLOW}[8/8] Reconciling Testkube OSS & Benchmark/Security TestWorkflows...${NC}"
-if ! helm status testkube -n testkube >/dev/null 2>&1 || [ "${FORCE_HELM}" == "--upgrade-helm" ]; then
-    echo "Installing / upgrading Testkube OSS on worker node 'minikube-m02'..."
+if ! command -v testkube >/dev/null 2>&1; then
+    echo "Testkube CLI not found on host. Installing via Homebrew..."
+    brew install kubeshop/testkube/testkube || brew install testkube
+fi
+
+if ! helm status testkube -n testkube >/dev/null 2>&1 || \
+   ! kubectl -n testkube get deployment testkube-api-server >/dev/null 2>&1 || \
+   ! kubectl -n testkube get deployment testkube-mongodb >/dev/null 2>&1 || \
+   [ "${FORCE_HELM}" == "--upgrade-helm" ]; then
+    echo "Installing / recovering Testkube OSS on worker node 'minikube-m02'..."
     helm repo add kubeshop https://kubeshop.github.io/helm-charts >/dev/null 2>&1 || true
     helm repo update kubeshop >/dev/null
     helm upgrade --install testkube kubeshop/testkube \
@@ -194,7 +206,7 @@ if ! helm status testkube -n testkube >/dev/null 2>&1 || [ "${FORCE_HELM}" == "-
         -f "${K8S_DIR}/testkube/values-testkube.yaml" \
         --wait --timeout=5m
 else
-    echo -e "${GREEN}✓ Helm release 'testkube' already deployed on 'minikube-m02'.${NC}"
+    echo -e "${GREEN}✓ Helm release 'testkube' and core deployments verified on 'minikube-m02'.${NC}"
 fi
 
 kubectl apply -f "${K8S_DIR}/testkube/rbac.yaml" \
