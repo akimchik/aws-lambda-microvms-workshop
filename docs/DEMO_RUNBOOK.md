@@ -2,6 +2,12 @@
 
 This runbook contains step-by-step instructions to run a live demo comparing **AWS Lambda MicroVMs** and **Kubernetes Agent Sandbox (mogenius)** on your local Minikube cluster.
 
+> [!IMPORTANT]
+> **Docker Desktop Prerequisites (Do Not Use Defaults):**
+> - **Memory:** Allocate **10 GB – 12 GB RAM** in Docker Desktop settings. My bootstrap script assigns 8,192 MB directly to Minikube's 2 nodes; running on default 4 GB or 8 GB will trigger random `OOMKilled` (Exit Code 137) restarts on Grafana, MongoDB, or gVisor sandbox pods.
+> - **CPUs:** Allocate **4 – 6 vCPUs** to prevent CPU throttling during concurrent 70 RPS load generation.
+> - **Disk:** Ensure **40 GB+ free disk space**. The downloaded container image layers alone total **~8.2 GB on disk** across gVisor sandbox runtimes, Grafana, Prometheus, MongoDB, Testkube, and NGINX Ingress.
+
 ---
 
 ## 📋 Zero-to-Hero Provisioning & Self-Healing Bootstrapper

@@ -156,6 +156,18 @@ spec:
           limits:
             cpu: 100m
             memory: 64Mi
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 1
+          periodSeconds: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 3
+          periodSeconds: 10
       volumes:
       - name: code
         configMap:
