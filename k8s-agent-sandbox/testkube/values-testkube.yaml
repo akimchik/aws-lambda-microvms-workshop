@@ -1,0 +1,88 @@
+# values-testkube.yaml
+# Testkube OSS configuration deployed to dedicated worker node (minikube-m02)
+
+global:
+  nodeSelector:
+    dedicated: testkube
+  tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "testkube"
+    effect: "NoSchedule"
+
+testkube-api:
+  service:
+    type: ClusterIP
+    port: 8088
+  nodeSelector:
+    dedicated: testkube
+  tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "testkube"
+    effect: "NoSchedule"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 384Mi
+  minio:
+    nodeSelector:
+      dedicated: testkube
+    tolerations:
+    - key: "dedicated"
+      operator: "Equal"
+      value: "testkube"
+      effect: "NoSchedule"
+    podSecurityContext:
+      fsGroup: 0
+    securityContext:
+      runAsUser: 0
+
+testkube-operator:
+  nodeSelector:
+    dedicated: testkube
+  tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "testkube"
+    effect: "NoSchedule"
+  resources:
+    requests:
+      cpu: 30m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+nats:
+  nodeSelector:
+    dedicated: testkube
+  tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "testkube"
+    effect: "NoSchedule"
+
+mongodb:
+  nodeSelector:
+    dedicated: testkube
+  tolerations:
+  - key: "dedicated"
+    operator: "Equal"
+    value: "testkube"
+    effect: "NoSchedule"
+  persistence:
+    enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 250m
+      memory: 384Mi
+
+testkube-dashboard:
+  enabled: false

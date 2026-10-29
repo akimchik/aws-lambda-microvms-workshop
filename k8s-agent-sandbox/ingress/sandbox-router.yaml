@@ -4,6 +4,7 @@ metadata:
   name: sandbox-router
   namespace: agent-sandbox-system
   labels:
+    app: sandbox-router
     app.kubernetes.io/name: sandbox-router
     app.kubernetes.io/instance: sandbox-router
 spec:
@@ -14,6 +15,7 @@ spec:
   template:
     metadata:
       labels:
+        app: sandbox-router
         app.kubernetes.io/name: sandbox-router
         app.kubernetes.io/instance: sandbox-router
     spec:
@@ -61,6 +63,7 @@ metadata:
   name: sandbox-router
   namespace: agent-sandbox-system
   labels:
+    app: sandbox-router
     app.kubernetes.io/name: sandbox-router
     app.kubernetes.io/instance: sandbox-router
 spec:

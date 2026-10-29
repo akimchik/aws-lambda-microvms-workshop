@@ -1,0 +1,246 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox-egress-system
+  labels:
+    kubernetes.io/metadata.name: sandbox-egress-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: broker-upstream-credentials
+  namespace: sandbox-egress-system
+type: Opaque
+stringData:
+  GITHUB_APP_INSTALLATION_TOKEN: "ghs_ephemeral_15m_ttl_998877665544332211"
+  S3_SCOPED_SESSION_TOKEN: "sts_ephemeral_tenant_scoped_session_15m_ttl"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: egress-broker-code
+  namespace: sandbox-egress-system
+data:
+  broker.py: |
+    #!/usr/bin/env python3
+    import os
+    import json
+    import urllib.request
+    import urllib.error
+    import urllib.parse
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    WHITELIST_HOSTS = [
+        "pypi.org",
+        "files.pythonhosted.org",
+        "github.com",
+        "api.github.com",
+        "raw.githubusercontent.com"
+    ]
+
+    GITHUB_TOKEN = os.environ.get("GITHUB_APP_INSTALLATION_TOKEN", "")
+
+    class BrokerHandler(BaseHTTPRequestHandler):
+        def _send_json(self, status_code, data):
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data, indent=2).encode())
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            
+            if parsed.path == "/healthz":
+                self._send_json(200, {"status": "healthy", "service": "egress-credential-broker"})
+                return
+
+            # Out-of-sandbox Credential Injection endpoint
+            if parsed.path.startswith("/github-api/"):
+                # Simulates calling upstream with short-lived token injected outside sandbox
+                self._send_json(200, {
+                    "status": "authenticated",
+                    "token_injected": True,
+                    "auth_header_present": bool(GITHUB_TOKEN),
+                    "token_ttl_seconds": 900,
+                    "injected_by": "sandbox-egress-broker",
+                    "authorized_scope": "repo:read-only",
+                    "repository": "my-enterprise/agent-target-repo",
+                    "note": "Token was injected on-the-wire by the proxy. Sandbox holds 0 credentials."
+                })
+                return
+
+            # L7 Egress Filtering Proxy endpoint
+            if parsed.path == "/proxy":
+                qs = urllib.parse.parse_qs(parsed.query)
+                target_url = qs.get("url", [""])[0]
+                if not target_url:
+                    self._send_json(400, {"error": "Missing 'url' query parameter"})
+                    return
+                
+                target_parsed = urllib.parse.urlparse(target_url)
+                target_host = target_parsed.hostname or ""
+                
+                # Check FQDN Whitelist
+                if target_host not in WHITELIST_HOSTS:
+                    self._send_json(403, {
+                        "error": "BLOCKED_BY_L7_POLICY",
+                        "message": f"Outbound access to '{target_host}' is blocked by Sandbox Egress Policy.",
+                        "allowed_domains": WHITELIST_HOSTS
+                    })
+                    return
+
+                # Forward allowed request
+                try:
+                    req = urllib.request.Request(target_url, headers={"User-Agent": "sandbox-egress-proxy"})
+                    with urllib.request.urlopen(req, timeout=5.0) as resp:
+                        content = resp.read()
+                        self.send_response(resp.status)
+                        for k, v in resp.getheaders():
+                            if k.lower() not in ["content-length", "transfer-encoding"]:
+                                self.send_header(k, v)
+                        self.send_header("Content-Length", str(len(content)))
+                        self.end_headers()
+                        self.wfile.write(content)
+                except Exception as e:
+                    self._send_json(502, {"error": "Upstream error", "detail": str(e)})
+                return
+
+            self._send_json(404, {"error": "Not Found", "path": self.path})
+
+    def run():
+        port = 8080
+        server = HTTPServer(("0.0.0.0", port), BrokerHandler)
+        print(f"Egress & Credential Broker listening on port {port}...")
+        server.serve_forever()
+
+    if __name__ == "__main__":
+        run()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: egress-broker
+  namespace: sandbox-egress-system
+  labels:
+    app: egress-broker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: egress-broker
+  template:
+    metadata:
+      labels:
+        app: egress-broker
+    spec:
+      containers:
+      - name: broker
+        image: python:3.11-alpine
+        command: ["python3", "/app/broker.py"]
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: GITHUB_APP_INSTALLATION_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: broker-upstream-credentials
+              key: GITHUB_APP_INSTALLATION_TOKEN
+        volumeMounts:
+        - name: code
+          mountPath: /app
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 1
+          periodSeconds: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 3
+          periodSeconds: 10
+      volumes:
+      - name: code
+        configMap:
+          name: egress-broker-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress-broker
+  namespace: sandbox-egress-system
+  labels:
+    app: egress-broker
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http
+  selector:
+    app: egress-broker
+---
+# NetworkPolicy allowing sandbox pods and testkube security runners to reach the egress broker
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-sandbox-to-broker
+  namespace: sandbox-egress-system
+spec:
+  podSelector:
+    matchLabels:
+      app: egress-broker
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: agent-sandbox
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: testkube
+    ports:
+    - protocol: TCP
+      port: 8080
+  policyTypes:
+  - Ingress
+---
+# Egress NetworkPolicy in agent-sandbox allowing both warm-pool and claimed sandboxes to reach the Egress Broker
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-sandbox-to-egress-broker
+  namespace: agent-sandbox
+spec:
+  podSelector: {}
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: sandbox-egress-system
+      podSelector:
+        matchLabels:
+          app: egress-broker
+    ports:
+    - protocol: TCP
+      port: 8080
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+  policyTypes:
+  - Egress

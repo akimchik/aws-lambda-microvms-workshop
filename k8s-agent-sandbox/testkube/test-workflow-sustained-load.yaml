@@ -1,0 +1,121 @@
+apiVersion: testworkflows.testkube.io/v1
+kind: TestWorkflow
+metadata:
+  name: agent-sandbox-sustained-load
+  namespace: testkube
+  labels:
+    app: agent-sandbox-sustained-load
+    category: performance-sustained-load
+spec:
+  job:
+    namespace: testkube
+  pod:
+    nodeSelector:
+      dedicated: testkube
+    tolerations:
+    - key: "dedicated"
+      operator: "Equal"
+      value: "testkube"
+      effect: "NoSchedule"
+  config:
+    targetUrl:
+      description: Target Ingress URL
+      type: string
+      default: "http://192.168.49.2:80"
+    qps:
+      description: Ingress Request Rate (QPS / RPS)
+      type: integer
+      default: 70
+    duration:
+      description: Sustained Benchmark Duration (e.g. 150s for ~10.5K requests)
+      type: string
+      default: "150s"
+  content:
+    files:
+    - path: k6-sustained-load.js
+      content: |
+        import http from 'k6/http';
+        import { check } from 'k6';
+        import { Rate, Trend } from 'k6/metrics';
+
+        export const successRate = new Rate('sandbox_success_rate');
+        export const manifestLatency = new Trend('sandbox_manifest_duration_ms');
+
+        export const options = {
+          scenarios: {
+            sustained_traffic: {
+              executor: 'constant-arrival-rate',
+              rate: Number(__ENV.QPS) || 70,
+              timeUnit: '1s',
+              duration: __ENV.BENCH_DURATION || '150s',
+              preAllocatedVUs: 20,
+              maxVUs: 60,
+            },
+          },
+          thresholds: {
+            http_req_failed: ['rate<0.01'],
+            http_req_duration: ['p(95)<150'],
+          },
+        };
+
+        const BASE_URL = __ENV.TARGET_URL || 'http://192.168.49.2:80';
+        const SANDBOX_ID = __ENV.SANDBOX_ID;
+        const SANDBOX_NAMESPACE = 'agent-sandbox';
+        const SANDBOX_PORT = '8080';
+
+        const HEADERS = {
+          'Host': 'sandbox.127.0.0.1.nip.io',
+          'X-Sandbox-ID': SANDBOX_ID,
+          'X-Sandbox-Namespace': SANDBOX_NAMESPACE,
+          'X-Sandbox-Port': SANDBOX_PORT,
+          'User-Agent': 'k6-testkube-sustained-load',
+        };
+
+        export default function () {
+          const res = http.get(`${BASE_URL}/manifest.json`, { headers: HEADERS });
+          const ok = check(res, {
+            'status is 200': (r) => r.status === 200,
+          });
+          successRate.add(ok);
+          manifestLatency.add(res.timings.duration);
+        }
+  steps:
+  - name: Locate Active Warm-Pool Sandbox (No Restart / No Teardown)
+    run:
+      image: bitnami/kubectl:latest
+      shell: |
+        set -e
+        echo "=== Locating active standby pod from warm pool 'default' ==="
+        SELECTOR=$(kubectl -n agent-sandbox get sandboxwarmpool default -o jsonpath='{.status.selector}')
+        SANDBOX_ID=$(kubectl -n agent-sandbox get pods -l "$SELECTOR" -o jsonpath='{.items[0].metadata.name}')
+
+        if [ -z "$SANDBOX_ID" ]; then
+          echo "ERROR: No active warm-pool sandbox found!"
+          exit 1
+        fi
+
+        echo "Targeting active warm-pool sandbox: $SANDBOX_ID"
+        echo "NOTE: This workflow does NOT claim or delete the sandbox, so the pod will NOT be restarted."
+        echo "$SANDBOX_ID" > /data/sandbox_id.txt
+
+  - name: Run 70 RPS Sustained Load (10K+ Requests)
+    run:
+      image: grafana/k6:latest
+      env:
+      - name: TARGET_URL
+        value: "{{ config.targetUrl }}"
+      - name: QPS
+        value: "{{ config.qps }}"
+      - name: BENCH_DURATION
+        value: "{{ config.duration }}"
+      shell: |
+        if [ -f /data/sandbox_id.txt ]; then
+          export SANDBOX_ID=$(cat /data/sandbox_id.txt)
+        fi
+        echo "=== Firing sustained load ($QPS RPS for $BENCH_DURATION) at Sandbox ($SANDBOX_ID) via Ingress ($TARGET_URL) ==="
+        SCRIPT_PATH=$(find / -name "k6-sustained-load.js" 2>/dev/null | head -n 1)
+        if [ -z "$SCRIPT_PATH" ]; then
+          echo "ERROR: k6-sustained-load.js not found!"
+          exit 1
+        fi
+        k6 run "$SCRIPT_PATH"
