@@ -54,7 +54,7 @@ echo -e "${BLUE}============================================================${NC
 # Benchmarking AI agent execution requires rigorous physical separation. If load
 # generators (k6, curl, probe runners) run on the same node as gVisor sandboxes,
 # CPU cache thrashing and context switches invalidate latency measurements.
-# We create a 2-node cluster and isolate Testkube onto 'minikube-m02'.
+# I create a 2-node cluster and isolate Testkube onto 'minikube-m02'.
 # ==============================================================================
 echo -e "\n${YELLOW}[1/8] Checking Minikube & Multi-Node Topology...${NC}"
 
@@ -124,7 +124,7 @@ echo -e "  ${GREEN}✓${NC} control-plane.minikube.internal mapped to ${CP_IP}."
 # [3/8] Native Google gVisor (runsc) Runtime & Containerd TOML Healing
 # ==============================================================================
 # Why native Google runsc?
-# Minikube's built-in gvisor addon bundles an obsolete KVM shim. We install the
+# Minikube's built-in gvisor addon bundles an obsolete KVM shim. I install the
 # official Google gVisor package from https://gvisor.dev/archive.key directly
 # into the primary Minikube node.
 #
@@ -132,7 +132,7 @@ echo -e "  ${GREEN}✓${NC} control-plane.minikube.internal mapped to ${CP_IP}."
 # Containerd requires a dedicated runtime handler stanza for runsc:
 #   [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
 #     runtime_type = "io.containerd.runsc.v1"
-# We idempotently inject this stanza into /etc/containerd/config.toml, ensure no
+# I idempotently inject this stanza into /etc/containerd/config.toml, ensure no
 # duplicate stanzas exist, restart containerd, and declare the Kubernetes RuntimeClass.
 # ==============================================================================
 echo -e "\n${YELLOW}[3/8] Reconciling containerd & native gVisor (runsc) runtime...${NC}"
@@ -222,7 +222,7 @@ echo -e "  ${GREEN}✓${NC} NGINX Ingress Controller is Ready."
 # ==============================================================================
 # Why custom values for Prometheus & Grafana?
 # Under sustained 70 RPS load generation, Grafana's default embedded SQLite engine
-# suffers database lock contention and memory spikes. Our custom values enable
+# suffers database lock contention and memory spikes. My custom values enable
 # SQLite WAL mode ('wal: true'), set a 1.5Gi memory limit, and lengthen health probes
 # to 5 seconds to eliminate OOMKilled crashes.
 #
@@ -271,7 +271,7 @@ echo -e "  ${GREEN}✓${NC} Monitoring Ingress and all 3 Grafana Dashboards reco
 #
 # CRITICAL NETWORK POLICY REQUIREMENT:
 # mogenius warm-pool generates a NetworkPolicy that permits ingress ONLY from pods
-# carrying the label 'app: sandbox-router'. We enforce this label in sandbox-router.yaml.
+# carrying the label 'app: sandbox-router'. I enforce this label in sandbox-router.yaml.
 # ==============================================================================
 echo -e "\n${YELLOW}[6/8] Reconciling mogenius Agent Sandbox, Warm Pool & Router...${NC}"
 
@@ -334,7 +334,7 @@ echo -e "  ${GREEN}✓${NC} Egress & Credential Broker and cross-namespace Netwo
 # Why Testkube OSS?
 # Testkube provides cloud-native testing orchestration inside Kubernetes.
 # Rather than running ad-hoc scripts from the host machine, Testkube executes
-# test workflows as native Kubernetes jobs on our dedicated worker node ('minikube-m02').
+# test workflows as native Kubernetes jobs on my dedicated worker node ('minikube-m02').
 #
 # Components Pinned to 'minikube-m02':
 #   • testkube-api-server  : Orchestration control plane
