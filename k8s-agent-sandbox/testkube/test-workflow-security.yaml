@@ -37,7 +37,7 @@ spec:
   content:
     git:
       uri: https://github.com/akimchik/aws-lambda-microvms-workshop.git
-      revision: 'threat-model-benchmark-(1)'
+      revision: main
       paths:
       - k8s-agent-sandbox/testkube/tests
       - k8s-agent-sandbox/threat-model
