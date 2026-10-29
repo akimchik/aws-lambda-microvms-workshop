@@ -4,9 +4,9 @@ This runbook contains step-by-step instructions to run a live demo comparing **A
 
 > [!IMPORTANT]
 > **Docker Desktop Prerequisites (Do Not Use Defaults):**
-> - **Memory:** Allocate **10 GB – 12 GB RAM** in Docker Desktop settings. My bootstrap script assigns 8,192 MB directly to Minikube's 2 nodes; running on default 4 GB or 8 GB will trigger random `OOMKilled` (Exit Code 137) restarts on Grafana, MongoDB, or gVisor sandbox pods.
-> - **CPUs:** Allocate **4 – 6 vCPUs** to prevent CPU throttling during concurrent 70 RPS load generation.
-> - **Disk:** Ensure **40 GB+ free disk space**. The downloaded container image layers alone total **~8.2 GB on disk** across gVisor sandbox runtimes, Grafana, Prometheus, MongoDB, Testkube, and NGINX Ingress.
+> - **Memory:** Allocate **10 GB – 12 GB RAM** in Docker Desktop settings. My bootstrap script creates `minikube` with an 8,192 MB limit and adds `minikube-m02` with Minikube's default (~4 GB limit). The converged, idle stack uses ~5 GiB and ran for me in an 8.8 GB Docker VM, so 10–12 GB is headroom for cold image pulls and sustained load; on Docker's default 4 GB, expect `OOMKilled` (Exit Code 137) restarts on Grafana, MongoDB, or gVisor sandbox pods.
+> - **CPUs:** Allocate **4+ vCPUs** to prevent CPU throttling during concurrent 70 RPS load generation.
+> - **Disk:** Ensure **40 GB+ free disk space**. The containerd image stores on the two nodes measured **~8.2 GB** (5.1 GB + 3.1 GB); see the breakdown in the [README](../README.md#-container-image-footprint-82-gb-on-disk).
 
 ---
 
@@ -112,7 +112,7 @@ kubectl -n agent-sandbox delete sandboxclaim demo-ingress-claim
 
 ## 🚀 Demo Step 1: Basic Execution & Kernel Isolation (Module 1 Parity)
 
-In AWS, we launched a MicroVM with `aws lambda-microvms run-microvm` and hit `/execute`. In Kubernetes, we claim an isolated gVisor sandbox from the warm pool.
+In AWS, I launched a MicroVM with `aws lambda-microvms run-microvm` and hit `/execute`. In Kubernetes, I claim an isolated gVisor sandbox from the warm pool.
 
 ### 1.1 Claim a Sandbox from the Warm Pool
 ```bash
@@ -165,7 +165,7 @@ kubectl -n agent-sandbox delete sandboxclaim demo-module1-claim
 
 ## ⚡ Demo Step 2: Ephemeral CI/CD Warm Pool Runner (Module 3 Parity)
 
-In AWS, we booted an ephemeral microVM to execute `ci/steps.sh` on git push and report results. Here, we do the same natively in Kubernetes without cold-start latency.
+In AWS, I booted an ephemeral microVM to execute `ci/steps.sh` on git push and report results. Here, I do the same natively in Kubernetes without cold-start latency.
 
 ### 2.1 Claim a Runner Sandbox
 ```bash

@@ -97,35 +97,43 @@ This repository contains the end-to-end reference architectures, deployment mani
 
 Running a production-grade 2-node Kubernetes cluster locally (`minikube` control-plane + `minikube-m02` worker) with Google gVisor kernel virtualization, Prometheus + Grafana OSS, MongoDB, and automated Testkube load generation is an enterprise-scale architecture.
 
+**Required host tooling:** Docker Desktop, `minikube`, `kubectl`, and `helm`. The `testkube` CLI is installed through Homebrew by `bootstrap_cluster.sh` if it is missing. The AWS half of the repo additionally needs the AWS CLI and AWS SAM CLI.
+
 > [!IMPORTANT]
 > **Docker Desktop Resource Allocations:**
-> Do **NOT** run this stack with default Docker Desktop settings (4 GB RAM / 2 CPUs). The Docker VM will suffer random `OOMKilled` (Exit Code 137) terminations on Grafana, MongoDB, or gVisor sandbox pods.
-> - **Memory:** **10 GB – 12 GB RAM minimum** (My bootstrap script allocates 8,192 MB directly to Minikube for the control-plane and worker nodes, with the remaining 2–4 GB required by the Docker VM hypervisor, page cache, and containerd).
-> - **CPUs:** **4 – 6 vCPUs minimum** (to prevent CPU throttling during concurrent 70 RPS load generation, gVisor syscall virtualization, and Prometheus TSDB indexing).
-> - **Disk:** **40 GB+ free disk space** (The uncompressed container image layers alone exceed **~8.2 GB** on disk).
+> Do **NOT** run this stack with default Docker Desktop settings (4 GB RAM / 2 CPUs); Grafana, MongoDB or the gVisor sandbox pods will be `OOMKilled` (Exit Code 137).
+> - **Memory:** I recommend a **10 GB – 12 GB** Docker VM. `bootstrap_cluster.sh` creates `minikube` with an 8,192 MB limit, and `minikube-m02` is added with Minikube's default (~4 GB limit), so the container limits add up to ~12 GB. On my machine the converged, idle stack uses **~5 GiB** and runs inside an 8.8 GB Docker VM; 10–12 GB is headroom for cold image pulls and sustained 70 RPS load, not a measured minimum.
+> - **CPUs:** **4+ vCPUs** (`minikube` is created with `--cpus=4`) to avoid throttling during load generation, gVisor syscall interception, and Prometheus TSDB indexing.
+> - **Disk:** **40 GB+ free** (see the measured image footprint below).
 
-### 📦 Why Does It Require ~8.2 GB of Container Images?
-When running from a clean slate (`minikube delete`), Kubernetes pulls over 2.2 GB of compressed archives that expand to **~8.2 GB of image layers on disk**:
+### 📦 Container Image Footprint (~8.2 GB on disk)
 
-| Container Image | Tag / Source | Compressed / Disk Size | Purpose / Layer Contents |
+I measured this on a converged cluster with `docker exec <node> du -sh /var/lib/containerd` and `crictl images`:
+
+| Node | containerd store on disk |
+| :--- | :--- |
+| `minikube` (control-plane + sandboxes + observability) | **5.1 GB** |
+| `minikube-m02` (Testkube worker) | **3.1 GB** |
+| **Total** | **~8.2 GB** (plus the 1.3 GB `kicbase` node image held by Docker) |
+
+The distinct images add up to only ~2.8 GB as reported by `crictl`; the rest is containerd keeping both the downloaded layers and their unpacked snapshots, and each node holding its own copy of shared images (`kube-system`, `kindnet`, `kube-proxy`, `node-exporter`). The largest images (sizes as reported by `crictl images`):
+
+| Image | Size | Node | Purpose |
 | :--- | :--- | :--- | :--- |
-| **`sandbox-default`** | `ghcr.io/mogenius/...:1.2.1` | **723 MB / ~1.85 GB** | Full `code-server` VS Code workbench, Python runtime, Node.js toolchains, gVisor guest binaries. |
-| **`grafana`** | `grafana/grafana:13.2.4-distroless` | **435 MB / ~850 MB** | Grafana Core OSS, Bleve full-text search indexing engine, bundled dashboard panels. |
-| **`mongodb`** | `bitnami/mongodb:latest` | **450 MB / ~920 MB** | Testkube execution state, workflow execution artifacts, and log storage backend. |
-| **`prometheus`** | `quay.io/prometheus/...:v3.15.1` | **105 MB / ~250 MB** | High-performance TSDB, scrape engine, and query evaluation runtime. |
-| **`ingress-nginx-controller`**| `registry.k8s.io/...` | **110 MB / ~280 MB** | L7 dynamic Ingress proxy and HTTP header multiplexer. |
-| **`testkube-api-server`** | `kubeshop/...:2.14.2` | **85 MB / ~180 MB** | Testkube OSS orchestration control plane. |
-| **`testkube-tw-toolkit / init`**| `kubeshop/...:2.14.2` | **120 MB / ~240 MB** | Test workflow pod initialization, state synchronization, and execution toolkit. |
-| **`k6`** | `grafana/k6:latest` | **45 MB / ~110 MB** | High-throughput distributed load generation engine. |
-| **`agent-sandbox-controller`**| `registry.k8s.io/...:v1.0.4` | **15 MB / ~35 MB** | `kubernetes-sigs/agent-sandbox` core CRD controller. |
-| **`sandbox-router-go`** | `registry.k8s.io/...:v1.0.4` | **17 MB / ~40 MB** | Go-based dynamic header routing proxy (`X-Sandbox-ID`). |
-| **`k8s-sidecar` (x2)** | `quay.io/kiwigrid/...:2.14.1` | **30 MB / ~75 MB** | Automated dashboard and datasource ConfigMap watchers. |
-| **`python`** | `python:3.11-alpine` | **21 MB / ~55 MB** | Zero-trust Out-of-Sandbox Egress & Credential Broker. |
-| **Kubernetes Base** | `kicbase`, `etcd`, `apiserver`, `coredns`| **~1.2 GB / ~3.2 GB** | Multi-node Minikube control-plane and worker core infrastructure. |
-| **TOTAL FOOTPRINT** | | **~2.2 GB / ~8.2 GB+** | **Complete local multi-node microVM sandbox + observability platform.** |
+| `ghcr.io/mogenius/agent-sandbox-chart/sandbox-default:1.2.1` | 723 MB | `minikube` | Warm-pool sandbox workload (`code-server`, Python and Node toolchains) |
+| `kubeshop/bitnami-mongodb:8.3.11` | 615 MB | `minikube-m02` | Testkube execution state and logs |
+| `grafana/grafana:13.2.4-distroless` | 435 MB | `minikube` | Dashboards |
+| `ingress-nginx/controller` | 110 MB | `minikube` | L7 ingress |
+| `prometheus/prometheus:v3.15.1-distroless` | 105 MB | `minikube` | TSDB and scraping |
+| `kubeshop/testkube-minio:2025.10` | 85 MB | `minikube-m02` | Test artifact storage |
+| `kubeshop/testkube-api-server:2.14.2` | 77 MB | `minikube-m02` | Testkube control plane |
+| `bitnami/kubectl:latest` | 76 MB | `minikube-m02` | Helper jobs |
+| `kubeshop/testkube-tw-toolkit` + `tw-init` `:2.14.2` | 69 MB | `minikube-m02` | TestWorkflow pod toolkit |
+| `grafana/k6:latest` | 34 MB | `minikube-m02` | Load generator |
+| Everything else (Kubernetes core, CNI, NATS, operators, sidecars, router, controller, `python:3.11-alpine` broker) | ~440 MB | both | Platform plumbing |
 
 > [!TIP]
-> **Cold Boot Patience:** On a fresh cluster (`minikube delete`), containerd must download and unpack all 8.2 GB of layers sequentially. Once cached by Docker, subsequent cluster boots (`minikube stop; minikube start` or re-running `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh`) take under **45 seconds**.
+> **Cold Boot Patience:** On a fresh cluster (`minikube delete`), the image pulls dominate; the 723 MB sandbox image alone can occupy containerd for over a minute, which is why the bootstrap rollout timeouts are 180 s. Once the images are cached on the nodes, re-running `./k8s-agent-sandbox/scripts/bootstrap_cluster.sh` on a converged cluster took ~20 seconds in my run.
 
 ---
 
