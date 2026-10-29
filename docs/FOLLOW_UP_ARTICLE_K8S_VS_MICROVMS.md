@@ -13,7 +13,7 @@ At the time, **AWS Lambda MicroVMs** looked like the undisputed answer. Built on
 2. **Snapshot-based rapid resume** (`suspend-microvm` / `resume-microvm`) that seemed to shatter the economics of warm worker pools ($0.00 when idle).
 3. **A Dynamic IAM "Token Vending Machine"** that scoped shared S3 access per tenant at runtime using `sts:AssumeRole`.
 
-But in platform engineering, architectural slides and cloud provider demos only tell half the story. To find out whether AWS Lambda MicroVMs truly beat Kubernetes in production, we took our entire [4-module AWS MicroVMs repository](https://github.com/akimchik/aws-lambda-microvms-workshop) and [rebuilt it 1-to-1 on Kubernetes](https://github.com/akimchik/aws-lambda-microvms-workshop/tree/aws-vs-k8s-agent-sandbox-comparison-(1)) using **[`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox)** (via the **[mogenius Agent Sandbox](https://docs.mogenius.com/agent-sandbox/overview)** Helm distribution), **Google gVisor (`runsc`)**, **NGINX Ingress**, and a full **Prometheus + Grafana OSS** observability stack.
+But in platform engineering, architectural slides and cloud provider demos only tell half the story. To find out whether AWS Lambda MicroVMs truly beat Kubernetes in production, we took our entire [4-module AWS MicroVMs repository](https://github.com/akimchik/aws-lambda-microvms-workshop) and [rebuilt it 1-to-1 on Kubernetes](https://github.com/akimchik/aws-lambda-microvms-workshop/tree/main) using **[`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox)** (via the **[mogenius Agent Sandbox](https://docs.mogenius.com/agent-sandbox/overview)** Helm distribution), **Google gVisor (`runsc`)**, **NGINX Ingress**, and a full **Prometheus + Grafana OSS** observability stack.
 
 What we uncovered forced us to rethink everything—including a **critical security vulnerability in our own AWS Module 4 architecture**.
 
@@ -169,4 +169,4 @@ So, were we wrong in Part 1?
 
 ### 🔗 Explore the Code, Dashboards & Benchmarks
 All 4 AWS Lambda MicroVM modules, the Kubernetes Agent Sandbox (`mogenius` + `gVisor`) manifests, the NGINX Ingress + `sandbox-router` POC, Prometheus/Grafana dashboards, and the full [Functional Specification](AWS_LAMBDA_MICROVMS_VS_MOGENIUS_FUNCTIONAL_SPEC.md) are available in my GitHub repository:
-👉 **[`github.com/akimchik/aws-lambda-microvms-workshop`](https://github.com/akimchik/aws-lambda-microvms-workshop/tree/aws-vs-k8s-agent-sandbox-comparison-(1))**
+👉 **[`github.com/akimchik/aws-lambda-microvms-workshop`](https://github.com/akimchik/aws-lambda-microvms-workshop/tree/main)**
